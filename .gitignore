@@ -1,0 +1,18 @@
+# Meta files and folders
+.cache/
+.vscode/
+.idea/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Project outputs
+data/
+scripts/
+outputs/
+!outputs/reports/
+!outputs/reports/**
+src/slurm/
+wandb/

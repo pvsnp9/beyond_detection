@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=67"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beyond-detection"
+version = "0.1.0"
+description = "Beyond detection utilities and data generation."
+readme = "README.md"
+requires-python = ">=3.9"
+
+[tool.setuptools]
+packages = {find = {where = ["."]}}

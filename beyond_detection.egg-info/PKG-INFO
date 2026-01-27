@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: beyond-detection
+Version: 0.1.0
+Summary: Beyond detection utilities and data generation.
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
