@@ -16,9 +16,10 @@ def load_hf_dataset(
     streaming: bool = False,
     cache_dir: Optional[str] = None,
     download_mode: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> DatasetLike:
     """Load a Hugging Face dataset without altering its schema."""
-    return load_dataset(
+    dataset = load_dataset(
         dataset_id,
         name=config_name,
         split=split,
@@ -26,3 +27,23 @@ def load_hf_dataset(
         cache_dir=cache_dir,
         download_mode=download_mode,
     )
+    if mode == "rationale_sft":
+        allowed_tasks = {"explanation", "detection_explanation"}
+
+        def _keep_example(example):
+            task = example.get("task") if isinstance(example, dict) else None
+            return task in allowed_tasks
+
+        if isinstance(dataset, (DatasetDict, IterableDatasetDict)):
+            dataset = type(dataset)(
+                {split_name: split_ds.filter(_keep_example) for split_name, split_ds in dataset.items()}
+            )
+        else:
+            dataset = dataset.filter(_keep_example)
+    try:
+        dataset_len = len(dataset)
+    except TypeError:
+        dataset_len = None
+    if dataset_len is not None:
+        print(f"Dataset size: {dataset_len}")
+    return dataset

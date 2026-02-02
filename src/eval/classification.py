@@ -45,6 +45,30 @@ def get_latest_result_files(
 
     return result
 
+def merge_files(input_file: str, output_file: str) -> None:
+    try:
+        print(f"Starting merge from {input_file} into {output_file}")
+        assert input_file.endswith("explanation.jsonl"), "Input file must be a explanation.jsonl file"
+        assert output_file.endswith("detection_explanation.jsonl"), "Output file must be a detection_explanation.jsonl file"
+        total_lines = 0
+        out_path = Path(output_file)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("a", encoding="utf-8") as out_handle:
+            with open(input_file, "r", encoding="utf-8") as in_handle:
+                for line in in_handle:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    out_handle.write(line + "\n")
+                    total_lines += 1
+        print(
+            f"Completed merging into {output_file}. Total lines merged: {total_lines}"
+        )
+    except Exception as e:
+        print(f"Exception occured while merging files: {e}")
+        raise e
+    
+
 def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[str, Any]]:
     try:
         files = files or {}
@@ -60,6 +84,10 @@ def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[s
                 per_task_payload: Dict[str, Dict[str, Any]] = {}
 
                 for file_path in model_files:
+                    # Skip explanation files
+                    if file_path.endswith("/explanation.jsonl"):
+                        continue
+                    print(f"Processing file: {file_path} for model: {model_name}\n")
                     task = Path(file_path).stem
                     total_sample = 0
                     parsing_failed_count = 0
@@ -160,6 +188,19 @@ def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[s
         raise e
 
 
+
 # if __name__ == "__main__":
-#     gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
-#     compute_f1(gen_files)
+    # gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
+    # code for merging explanation and detection_explanation files into one detection_explanation file
+    # for model_name, files in gen_files.items():
+    #     print(f"Processing model: {model_name} with files: {files}")
+    #     if len(files) > 2:
+    #         merge_files(str(files[2]), str(files[1]))
+    #         # print(f"{str(files[2])}, {str(files[1])}\n")
+    #     else: print(f"Not enough files to merge for model: {model_name}")
+    #     print("-----"*20)
+        # merged_file = os.path.join(Logistics().project_root_dir, Logistics().results_dir, model_name, "merged_results.jsonl")
+        # merge_files(files, merged_file)
+        # gen_files[model_name] = [merged_file]
+    
+    # compute_f1(gen_files)

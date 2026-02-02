@@ -62,6 +62,9 @@ def get_test_data(config_name: str = "en", task:str = "all"):
         elif task.lower() == "explanation":
             ds_exp = ds.filter(lambda x: x["task"] == "explanation")
             return ds_exp
+        elif task.lower() == "detection_explanation":
+            ds_dex = ds.filter(lambda x: x["task"] == "detection_explanation")
+            return ds_dex
         else: return ds
     except Exception as e:
         raise Exception(f"failed to load the test dataset {dataset_id}: {e}")
@@ -74,13 +77,13 @@ def generate_batch(model, model_inputs, processor, task: str = None, max_tokens=
         print("Generating response...")
         task_name = (task or "").strip().lower()
         gen_kwargs = {"max_new_tokens": max_tokens, "do_sample": False}
-        if task_name == "explanation":
+        if task_name in ["explanation", "detection_explanation"]:
             gen_kwargs = {
                 "max_new_tokens": max_tokens,
                 "do_sample": True,
-                "temperature": 0.7,
+                "temperature": 0.3,
                 "top_p": 0.9,
-                "top_k": 30,
+                "top_k": 50,
             }
         with torch.no_grad():
             output_ids = model.generate(
@@ -124,7 +127,7 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
         results_dir = get_sft_result_dir(model_key)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         task_outputs = {}
-        for task in ["detection", "explanation"]:
+        for task in ["detection_explanation", "explanation"]:  #, "detection"
             ds = get_test_data(task=task)
             loader = DataLoader(
                 ds,

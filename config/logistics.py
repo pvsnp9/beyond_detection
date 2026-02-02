@@ -34,7 +34,7 @@ class Logistics:
 
     langs: List[str] = field(default_factory=lambda: ["en", "zh"])
     infer_bathc_size:int = 4
-    gen_max_token:int = 256
+    gen_max_token:int = 384
 
     hf_sft_ds_id: str = "alita9/beyond_sarcasm_detection_sft"
     hf_token:any = None
@@ -211,6 +211,7 @@ def build_cfg(model_name_or_path: str) -> dict:
         "lora": LoRAParams(),
         "sft": SFTParams(),
         "sft_extras": SFTConfigExtras(),
+        "mode": "rationale_sft",
         "model": {
             "base_model_name_or_path": model_name_or_path,
             "use_flash_attention": True,

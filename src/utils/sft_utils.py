@@ -91,6 +91,7 @@ def _load_eval_dataset(cfg: Dict[str, Any]) -> Tuple[Any, str]:
             config_name=cfg["dataset"]["lang"],
             streaming=cfg["dataset"]["streaming"],
             cache_dir=cfg["logistics"].hf_cache_dir,
+            mode=cfg.get("mode")
         )
         return eval_ds, cfg["dataset"]["eval_split"]
     except Exception:

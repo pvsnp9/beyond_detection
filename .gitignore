@@ -11,6 +11,7 @@ __pycache__/
 # Project outputs
 data/
 scripts/
+markdowns/
 outputs/
 !outputs/reports/
 !outputs/reports/**

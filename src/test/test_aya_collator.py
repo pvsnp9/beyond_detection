@@ -329,6 +329,16 @@ def main() -> None:
         pixel_values = train_outputs.get("pixel_values")
         if pixel_values is not None:
             print(f"pixel_values_shape={tuple(pixel_values.shape)}")
+        if vision_token_ids:
+            input_ids = train_outputs["input_ids"]
+            has_vision_tokens = False
+            for vid in vision_token_ids:
+                if (input_ids == vid).any().item():
+                    has_vision_tokens = True
+                    break
+            assert has_vision_tokens, "Expected vision tokens to be present in input_ids after processing."
+        else:
+            print("warning_no_vision_token_ids_detected=True")
 
         first = samples[0]
 

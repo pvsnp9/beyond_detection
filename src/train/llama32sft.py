@@ -38,7 +38,7 @@ from src.utils.logging import init_wandb, log_run_metadata
 def main() -> None:
     cfg = build_cfg(ModelCards().llama3_2vl)
     set_seed(cfg["sft"].seed)
-
+    cfg["mode"] = "rationale_sft"
     resolved = resolve_tokens_and_env(cfg["logistics"])
     set_runtime_env(resolved)
 
@@ -66,6 +66,7 @@ def main() -> None:
         config_name=cfg["dataset"]["lang"],
         streaming=cfg["dataset"]["streaming"],
         cache_dir=cfg["logistics"].hf_cache_dir,
+        mode=cfg.get("mode")
     )
     train_datasets = _select_subset(train_datasets, cfg["dataset"]["max_train_samples"])
 

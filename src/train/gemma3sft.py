@@ -39,7 +39,7 @@ def main() -> None:
         cfg = build_cfg(ModelCards().gemm3_12b)
         set_seed(cfg["sft"].seed) 
         cfg["sft"].max_length = 1280
-
+        cfg["mode"] = "rationale_sft"
         # these changing since we use A100 80G
         cfg["sft"].batch_size = 8
         cfg["sft"].gradient_accumulation_steps = 8 #64 batch
@@ -72,6 +72,7 @@ def main() -> None:
             config_name=cfg["dataset"]["lang"],
             streaming=cfg["dataset"]["streaming"],
             cache_dir=cfg["logistics"].hf_cache_dir,
+            mode=cfg.get("mode")
         )
         train_datasets = _select_subset(train_datasets, cfg["dataset"]["max_train_samples"])
 
