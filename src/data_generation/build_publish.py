@@ -12,6 +12,9 @@ from datasets import Dataset, DatasetDict
 logistics = Logistics()
 local_dirs = LocalDataDirs()
 
+#"This script produced data leakeg (but cleaend with @data_generation/clean_dataet), 
+# read data from combined dir, use it after review "
+
 def build_create_combined_sft(langs: list[str] = ["en"], splits: list[str] = ["train", "validation", "test"]):
     try:
         dirs_name = sorted(os.listdir(os.path.join(logistics.project_root_dir, logistics.data_generation_dir)))
@@ -138,6 +141,7 @@ def build_create_combined_dpo(langs: list[str] = ["en"], splits: list[str] = ["t
     except Exception as e:
         print(f"An error occurred: {e}")
 
+#ends here 
 
 def build_save_hf_formatted_sft_dataset(lang: str):
     try:
@@ -172,6 +176,33 @@ def build_save_hf_formatted_sft_dataset(lang: str):
 
     except Exception as e:
         print(f"An error occurred while creating HF formatted dataset for language {lang}: {e}")
+
+
+def build_save_hf_formatted_dpo_dataset(lang: str):
+    try:
+        combined_dir = os.path.join(logistics.project_root_dir, logistics.combined_data_dir, "dpo", lang)
+        splits = logistics.splits
+        out_dir = os.path.join(logistics.project_root_dir, logistics.processed_data_dir, "dpo", lang)
+        os.makedirs(out_dir, exist_ok=True)
+        for split in splits:
+            split_path = os.path.join(combined_dir, f"{split}.jsonl")
+            if not os.path.exists(split_path):
+                print(f"Missing split file: {split_path}")
+                out_path = os.path.join(out_dir, f"{split}.jsonl")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    pass
+                print(f"[{split}] [size:0] Completed writing HF formatted DPO dataset to {out_dir}")
+                continue
+
+            rows = read_jsonl(split_path)
+            out_path = os.path.join(out_dir, f"{split}.jsonl")
+            with open(out_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+            print(f"[{split}] [size:{len(rows)}] Completed writing HF formatted DPO dataset to {out_dir}")
+    except Exception as e:
+        print(f"An error occurred while creating HF formatted DPO dataset for language {lang}: {e}")
 
 
 def publish_sft_dataset_to_hf():
@@ -210,12 +241,13 @@ def publish_sft_dataset_to_hf():
 
 
 
-def run_build_save_hf_formatted_sft_dataset():
-    for lang in logistics.langs:
-        print(f"SFT HF data for {lang.upper} Lang")
-        build_save_hf_formatted_sft_dataset(lang)
 
 # if __name__ == "__main__":
-    #build_create_combined_sft(langs=['en', 'zh'])
-    #build_create_combined_dpo(langs=['en', 'zh'])
-    
+    # build_create_combined_sft(langs=['en', 'zh'])
+    # build_create_combined_dpo(langs=['en', 'zh'])
+    # for lang in logistics.langs:
+    #     print(f"Processing SFT dataset for language: {lang}")
+    #     build_save_hf_formatted_sft_dataset(lang)
+    #     print(f"Processing DPO dataset for language: {lang}")
+    #     build_save_hf_formatted_dpo_dataset(lang)
+    # publish_sft_dataset_to_hf()

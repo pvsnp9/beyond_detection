@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+import os
 from config.logistics import Logistics, ModelCards
 from src.eval.classification import get_latest_result_files
 from transformers import AutoProcessor
@@ -11,7 +11,7 @@ from transformers import AutoProcessor
 def compute_bert_metrics():
     try:
         files = get_latest_result_files()
-        report_dir = Path(Logistics().reports_dir)
+        report_dir = Path(os.path.join(Logistics().reports_dir, "expl"))
         report_dir.mkdir(parents=True, exist_ok=True)
         out_path = report_dir / f"nlp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
@@ -138,7 +138,7 @@ def compute_malformed_outputs(files: Optional[Dict[str, List[str]]] = None):
                 )
 
             tokenizer = getattr(processor, "tokenizer", processor)
-            result_dir = Path(Logistics().results_dir) / f"{model_name}/malformed_output_reports"
+            result_dir = Path(Logistics().results_dir) / f"{model_name}/malformed_outputs"
             result_dir.mkdir(parents=True, exist_ok=True)
 
             for file_path in model_files:
@@ -206,5 +206,5 @@ def compute_malformed_outputs(files: Optional[Dict[str, List[str]]] = None):
         raise e
 
 if __name__ == "__main__":
-    compute_bert_metrics()
-    # compute_malformed_outputs()
+    # compute_bert_metrics()
+    compute_malformed_outputs()

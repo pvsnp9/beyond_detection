@@ -48,6 +48,7 @@ class BaseModels:
 
 
 def get_test_data(config_name: str = "en", task:str = "all"):
+    dataset_id = None
     try:
         dataset_id = Logistics().hf_sft_ds_id
         ds = load_hf_dataset(
@@ -67,7 +68,8 @@ def get_test_data(config_name: str = "en", task:str = "all"):
             return ds_dex
         else: return ds
     except Exception as e:
-        raise Exception(f"failed to load the test dataset {dataset_id}: {e}")
+        ds_name = dataset_id or "<unknown>"
+        raise Exception(f"failed to load the test dataset {ds_name}: {e}")
 
 
 def generate_batch(model, model_inputs, processor, task: str = None, max_tokens=256):
@@ -98,7 +100,9 @@ def generate_batch(model, model_inputs, processor, task: str = None, max_tokens=
         return processor.batch_decode(generated_ids, skip_special_tokens=True)
 
     except Exception as e:
-        print(f"Generate batch failed: {e}")
+        task_label = (task or "").strip().lower() or "<unknown>"
+        print(f"Generate batch failed for task={task_label}: {e}")
+        return []
 
 
 
@@ -138,6 +142,8 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
             os.makedirs(task_dir, exist_ok=True)
             results_path = os.path.join(task_dir, f"{task}.jsonl")
             task_outputs[task] = results_path
+            written_count = 0
+            failed_gen_count = 0
             with open(results_path, "w", encoding="utf-8") as handle:
                 for batch in tqdm(loader, desc="Test", leave=False):
                     for mode in modes:
@@ -175,9 +181,18 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
                                 max_tokens=max_tokens,
                                 task=task
                             )
+                            if not outputs:
+                                failed_gen_count += len(batch)
+                                print(
+                                    "Skipping empty outputs for "
+                                    f"model={model_key}, task={task}, mode={mode}, "
+                                    f"batch_size={len(batch)}, checkpoint={checkpoint_path}"
+                                )
+                                continue
                             for example, output in zip(batch, outputs):
                                 record = {
                                     "mode": mode,
+                                    "gt":"sarcastic" if int(example.get("label_gt")) == 1 else "non_sarcastic",
                                     "task": example.get("task"),
                                     "query": example.get("query"),
                                     "target_json": example.get("target_json"),
@@ -188,11 +203,17 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
                                     "model_key": model_key,
                                 }
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                                print(f"Example meta: {record}\nOutput:\n{output}")
+                                written_count += 1
+                                # print(f"Example meta: {record}\nOutput:\n{output}")
                         else:
                             raise RuntimeError(f"failed to generate model input for {model_key}")
                     # for testing purpose
                     # break
+            print(
+                "##########################\n"
+                f"Total examples written for task={task}: {written_count}\n"
+                f"Total generation failures for task={task}: {failed_gen_count}"
+            )
         print("Complted Generating")
         return task_outputs
     except Exception as e: 
@@ -222,7 +243,11 @@ if __name__ == "__main__":
         raise SystemExit(f"Unknown model_key: {model_key}")
 
     model_dir = os.path.join(saved_model_path, models_dirs[model_key])
-    best_metric, best_chkpt_path = get_sft_best_model(model_dir).values()
+    best_model = get_sft_best_model(model_dir)
+    best_metric = best_model.get("best_metric")
+    best_chkpt_path = best_model.get("best_model_path")
+    if not best_chkpt_path:
+        raise SystemExit(f"No checkpoint found for {model_key} under {model_dir}")
     print(f"Running inference for {model_key} from {best_chkpt_path}")
     run_vlm_generation(
         model_key=model_key,

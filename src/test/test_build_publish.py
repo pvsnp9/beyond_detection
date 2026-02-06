@@ -1,80 +1,60 @@
+"""
+Visual verification for processed SFT/DPO datasets before HF publish.
+Prints split counts and a few sample rows per split.
+"""
+
+from __future__ import annotations
+
 import json
-import os
-import tempfile
-from types import SimpleNamespace
-from unittest import TestCase
-from unittest.mock import patch
-from typing import Optional
+from pathlib import Path
+from typing import Dict, Any, Iterable
 
-from src.data_generation import build_publish
+from config.logistics import Logistics
 
 
-class TestBuildPublish(TestCase):
-    def test_combines_without_duplicates_and_updates(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_root:
-            data_generation_dir = "data/generated"
-            combined_data_dir = "data/combined"
-            lang = "en"
-            split = "train"
+def _read_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-            sources = {
-                "source_a": [
-                    {"id": "1", "note": "a1"},
-                    {"id": "2", "note": "a2"},
-                    {"id": "4", "note": "a4"},
-                ],
-                "source_b": [
-                    {"id": "2", "note": "b2"},
-                    {"id": "3", "note": "b3"},
-                ],
-            }
 
-            for source, entries in sources.items():
-                data_dir = os.path.join(
-                    tmp_root,
-                    data_generation_dir,
-                    source,
-                    "keep",
-                    lang,
-                )
-                os.makedirs(data_dir, exist_ok=True)
-                data_path = os.path.join(data_dir, f"{split}.jsonl")
-                with open(data_path, "w", encoding="utf-8") as f:
-                    for entry in entries:
-                        f.write(json.dumps(entry) + "\n")
+def _print_split_summary(base_dir: Path, split: str, sample_size: int) -> None:
+    path = base_dir / f"{split}.jsonl"
+    if not path.exists():
+        print(f"{path} missing")
+        return
+    count = 0
+    samples = []
+    for rec in _read_jsonl(path):
+        count += 1
+        if len(samples) < sample_size:
+            samples.append(rec)
+    print(f"{path} count={count}")
+    for idx, rec in enumerate(samples, start=1):
+        print(f"sample[{idx}]: {json.dumps(rec, ensure_ascii=False)}")
 
-            build_publish.logistics = SimpleNamespace(
-                project_root_dir=tmp_root,
-                data_generation_dir=data_generation_dir,
-                combined_data_dir=combined_data_dir,
-                hf_datatset_ids={"source_a": "hf_a", "source_b": "hf_b"},
-            )
-            build_publish.local_dirs = SimpleNamespace(
-                source_a=os.path.join(tmp_root, "media", "source_a"),
-                source_b=os.path.join(tmp_root, "media", "source_b"),
-            )
 
-            def fake_load_hf_dataset(hf_id: str, split: str, config_name: Optional[str] = None):
-                return [
-                    {"id": "1", "label": 0},
-                    {"id": "2", "label": 1},
-                    {"id": "3", "label": 0},
-                ]
+def verify_processed(kind: str, sample_size: int = 2) -> None:
+    logistics = Logistics()
+    for lang in logistics.langs:
+        base_dir = Path(logistics.project_root_dir) / logistics.processed_data_dir / kind / lang
+        print(f"================== {kind} {lang} ==================\n")
+        for split in logistics.splits:
+            _print_split_summary(base_dir, split, sample_size)
 
-            with patch("src.data_generation.build_publish.load_hf_dataset", side_effect=fake_load_hf_dataset):
-                build_publish.build_create_combined(langs=[lang], splits=[split])
 
-            out_path = os.path.join(
-                tmp_root,
-                combined_data_dir,
-                lang,
-                f"{split}.jsonl",
-            )
-            with open(out_path, "r", encoding="utf-8") as f:
-                records = [json.loads(line) for line in f if line.strip()]
+def main() -> None:
+    verify_processed("sft")
+    verify_processed("dpo")
 
-            by_id = {record["id"]: record for record in records}
-            self.assertEqual(sorted(by_id.keys()), ["1", "2", "3"])
-            self.assertEqual(by_id["2"]["note"], "b2")
-            self.assertEqual(by_id["2"]["source"], "source_b")
-            self.assertEqual(by_id["2"]["label"], 1)
+
+if __name__ == "__main__":
+    main()

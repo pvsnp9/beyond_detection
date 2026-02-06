@@ -48,6 +48,19 @@ class Queries:
         "4. If `need_explanation` is false, return empty visual reasoning fields."
     )
 
+NON_SARC_EXPLANATION_TEMPLATES = [
+    "The caption is meant literally and matches the image content. There's no contradiction or hidden meaning, so it's non-sarcastic.",
+    "The text describes what's shown in the image in a straightforward way. The tone is sincere and the visual context supports the message.",
+    "This post is simply conveying information or a clear message. Nothing in the image suggests a mismatch, exaggeration, or mockery.",
+    "The wording is neutral and consistent with the visual facts. Since there's no ironic contrast between text and image, it's non-sarcastic.",
+    "The caption expresses a genuine feeling or opinion, and the image reinforces it rather than undermining it. There's no sarcastic intent.",
+    "Sarcasm typically involves incongruity between what is said and what is meant, often signaled by a mismatch with the image. Here, the message and visuals align, so it's non-sarcastic.",
+    "The text doesn't reverse its meaning or take a hidden jab at someone. It reads as straightforward, and the image doesn't introduce a contradictory cue.",
+    "Given the visual context, the caption makes sense as an honest statement. There's no evidence of irony, ridicule, or intentional contradiction.",
+    "The post appears to communicate its point sincerely. The image supports the same idea, so there's no reason to interpret it as sarcasm.",
+    "The caption and image are consistent and literal, with no ironic mismatch. Therefore, it's non-sarcastic.",
+]
+
 
 
 # 

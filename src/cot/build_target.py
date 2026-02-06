@@ -1,8 +1,10 @@
 import json
 from typing import Any, Dict, List
 import random
-from config.queries import Queries
+from config.queries import Queries, NON_SARC_EXPLANATION_TEMPLATES
 from datasets import Features, Value, Sequence, Image, ClassLabel
+
+quries = Queries()
 
 def label_to_str(label: int) -> str:
     return "sarcastic" if int(label) == 1 else "non_sarcastic"
@@ -34,6 +36,7 @@ def build_target_label_only(
             "evidence_fact_ids": [],
             "incongruity": "",
             "explanation": ""
+            
         }
 
     # Explanation requested/needed
@@ -56,10 +59,10 @@ def build_target_label_only(
         "visual_facts": vfacts,
         "evidence_fact_ids": default_evidence_ids(vfacts, k=2),
         "incongruity": "",
-        "explanation": "Not sarcastic: the caption aligns with what is shown in the image."
+        "explanation": random.choice(NON_SARC_EXPLANATION_TEMPLATES)
     }
 
-quries = Queries()
+
 
 def build_sft_rows_from_raw(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     teacher = raw["teacher"]
@@ -137,5 +140,3 @@ def get_hf_sft_features() -> Features:
         "quality_flags": Sequence(Value("string")),
         "teacher": Value("string"),
     })
-
-
