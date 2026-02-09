@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-
+from typing import List, Dict, Any
 
 @dataclass(frozen=True)
 class Queries:
@@ -61,6 +61,81 @@ NON_SARC_EXPLANATION_TEMPLATES = [
     "The caption and image are consistent and literal, with no ironic mismatch. Therefore, it's non-sarcastic.",
 ]
 
+
+
+
+REJECTED_SYSTEM_PROMPT = """You are generating REJECTED (non-preferred) responses for multimodal DPO (mDPO).
+You DO NOT have access to the image. You must rely ONLY on the provided CAPTION and VISUAL_FACTS.
+Your job is to create a strong, plausible decoy that is well-formed and similar length to CHOSEN, but WRONG due to exactly ONE controlled mistake.
+
+OUTPUT FORMAT RULES (strict):
+- Output MUST be a single valid JSON object (no markdown, no extra text).
+- Use keys: id, rejected, meta
+- The "rejected" value MUST be a single string in the same sectioned format as CHOSEN:
+  [VISUAL_FACTS] ... [TEXT_LITERAL] ... [INCONGRUITY] ... [EXPLANATION]
+- The rejected MUST:
+  (a) include the provided visual facts (do not write “not used”),
+  (b) include a coherent TEXT_LITERAL derived from CAPTION,
+  (c) include an INCONGRUITY and EXPLANATION that look reasonable,
+  (d) be wrong due to exactly ONE error_type from the allowed set.
+
+ALLOWED ERROR TYPES (choose exactly one):
+1) hallucinated_visual_detail  -> mention ONE concrete visual detail that is NOT in VISUAL_FACTS (only one hallucination).
+2) wrong_incongruity_pivot     -> use only given facts, but identify the wrong contradiction (plausible but incorrect pivot).
+3) evidence_mismatch           -> INCONGRUITY/EXPLANATION claim is plausible, but it is not supported by the provided VISUAL_FACTS (without adding new visual details).
+4) overgeneralized_world_claim -> makes the explanation hinge on an unjustified external claim about the named entity/event (without adding new visual details).
+
+CONSTRAINTS:
+- Keep length within ±15% of CHOSEN (approximate).
+- Do NOT change the meaning of CAPTION in TEXT_LITERAL.
+- Do NOT mention hashtags, “tone/common usage,” “without visual context,” or that you lack the image.
+- The rejected should be fluent and convincing; it must not be obviously worse or shorter.
+- Safety: do not add protected-attribute inferences, slurs, or calls for violence.
+
+QUALITY METADATA (required):
+In meta include:
+- error_type: one of the allowed types
+- hallucination_span: the exact phrase that is the mistake (or empty string if not hallucinated_visual_detail)
+- confidence: low/medium/high (how confident you are this rejected is wrong for exactly one reason)
+- notes: 1 short sentence explaining why it’s wrong
+"""
+
+ALLOWED_ERROR_TYPES = [
+    "hallucinated_visual_detail",
+    "wrong_incongruity_pivot",
+    "evidence_mismatch",
+    "overgeneralized_world_claim",
+]
+
+# JSON Schema for Structured Outputs (Responses API text.format json_schema)
+REJECT_SCHEMA: Dict[str, Any] = {
+    "name": "mdpo_rejected_generator",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        
+        "required": ["id", "rejected", "meta"],
+        "properties": {
+            "id": {"type": "string"},
+            "rejected": {"type": "string"},
+            "meta": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["error_type", "hallucination_span", "confidence", "notes"],
+                "properties": {
+                    "error_type": {
+                        "type": "string",
+                        "enum": ALLOWED_ERROR_TYPES,
+                    },
+                    "hallucination_span": {"type": "string"},
+                    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "notes": {"type": "string"},
+                },
+            },
+        },
+    },
+    "strict": True,
+}
 
 
 # 

@@ -5,6 +5,7 @@ from src.utils import read_jsonl
 from src.utils.env import resolve_tokens_and_env
 from src.cot.build_target import build_sft_rows_from_raw, get_hf_sft_features
 import os
+import shutil
 from datasets import Dataset, DatasetDict
 
 
@@ -178,10 +179,11 @@ def build_save_hf_formatted_sft_dataset(lang: str):
         print(f"An error occurred while creating HF formatted dataset for language {lang}: {e}")
 
 
-def build_save_hf_formatted_dpo_dataset(lang: str):
+def build_save_hf_formatted_dpo_dataset(lang: str, dir_name:str = "dpo"):
     try:
-        combined_dir = os.path.join(logistics.project_root_dir, logistics.combined_data_dir, "dpo", lang)
+        combined_dir = os.path.join(logistics.project_root_dir, logistics.combined_data_dir, dir_name, lang)
         splits = logistics.splits
+        # out dir to save file
         out_dir = os.path.join(logistics.project_root_dir, logistics.processed_data_dir, "dpo", lang)
         os.makedirs(out_dir, exist_ok=True)
         for split in splits:
@@ -198,11 +200,80 @@ def build_save_hf_formatted_dpo_dataset(lang: str):
             out_path = os.path.join(out_dir, f"{split}.jsonl")
             with open(out_path, "w", encoding="utf-8") as f:
                 for row in rows:
+                    prompt_text = row.get("prompt", "")
+                    if isinstance(prompt_text, str):
+                        prompt_only = prompt_text
+                        caption_only = ""
+                        marker = "\nCAPTION:"
+                        if marker in prompt_text:
+                            prompt_only, caption_only = prompt_text.split(marker, 1)
+                        row["prompt"] = prompt_only.strip()
+                        row["caption"] = " ".join(caption_only.split())
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
             print(f"[{split}] [size:{len(rows)}] Completed writing HF formatted DPO dataset to {out_dir}")
     except Exception as e:
         print(f"An error occurred while creating HF formatted DPO dataset for language {lang}: {e}")
+
+
+#filter keep only records for dpo dataest.
+#run after combined dataset is create and before hf formatting.
+def filter_dpo_ds_for_keep_records(lang: str):
+    try:
+        backups: dict[str, str] = {}
+        for split in logistics.splits:
+            dpo_path = os.path.join(
+                logistics.project_root_dir,
+                logistics.combined_data_dir,
+                "dpo",
+                lang,
+                f"{split}.jsonl",
+            )
+            sft_path = os.path.join(
+                logistics.project_root_dir,
+                logistics.combined_data_dir,
+                "sft",
+                lang,
+                f"{split}.jsonl",
+            )
+
+            if not os.path.exists(dpo_path):
+                print(f"Missing DPO split file: {dpo_path}")
+                continue
+            if not os.path.exists(sft_path):
+                print(f"Missing SFT split file: {sft_path}")
+                continue
+
+            sft_rows = read_jsonl(sft_path)
+            keep_ids = {row.get("id") for row in sft_rows if row.get("id")}
+
+            dpo_rows = read_jsonl(dpo_path)
+            filtered_rows = [row for row in dpo_rows if row.get("id") in keep_ids]
+
+            backup_path = f"{dpo_path}.bak"
+            shutil.copyfile(dpo_path, backup_path)
+            backups[dpo_path] = backup_path
+
+            with open(dpo_path, "w", encoding="utf-8") as f:
+                for row in filtered_rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+            print(
+                f"[{lang}] [{split}] kept {len(filtered_rows)}/{len(dpo_rows)} "
+                f"records based on SFT keep ids"
+            )
+            try:
+                os.remove(backup_path)
+            except Exception as exc:
+                print(f"Warning: failed to remove backup {backup_path}: {exc}")
+    except Exception as e:
+        for original_path, backup_path in backups.items():
+            try:
+                shutil.copyfile(backup_path, original_path)
+            except Exception as restore_exc:
+                print(f"Failed to restore {original_path} from backup: {restore_exc}")
+        print(f"Error filtering DPO dataset for {lang}. Restore complete. Please start again. Error: {e}")
+        raise
 
 
 def publish_sft_dataset_to_hf():
@@ -243,11 +314,18 @@ def publish_sft_dataset_to_hf():
 
 
 # if __name__ == "__main__":
-    # build_create_combined_sft(langs=['en', 'zh'])
-    # build_create_combined_dpo(langs=['en', 'zh'])
+    #build_create_combined_sft(langs=['en', 'zh'])
+    #build_create_combined_dpo(langs=['en', 'zh'])
     # for lang in logistics.langs:
-    #     print(f"Processing SFT dataset for language: {lang}")
-    #     build_save_hf_formatted_sft_dataset(lang)
-    #     print(f"Processing DPO dataset for language: {lang}")
-    #     build_save_hf_formatted_dpo_dataset(lang)
+        #print(f"Processing SFT dataset for language: {lang}")
+        #build_save_hf_formatted_sft_dataset(lang)
+        #print(f"Processing DPO dataset for language: {lang}")
+        # #filter_dpo_ds_for_keep_records(lang)
+        #build_save_hf_formatted_dpo_dataset(lang)
     # publish_sft_dataset_to_hf()
+
+
+
+# Note: for DPO dataset, run filter_dpo_ds_for_keep_records(lang) 
+# after combined dataset is created. (Combined -> processed/dpo (keep reocrds) )
+# then use dpo_creation clean the records (remove hastags, textual cues)

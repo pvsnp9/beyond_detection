@@ -159,5 +159,5 @@ def main() -> None:
     # check_hf_split_overlaps(logistics)
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

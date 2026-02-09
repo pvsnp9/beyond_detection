@@ -1,0 +1,3 @@
+## Rejected Generation Pipeline
+
+The script loads the processed DPO train split, picks a random error type per record, and builds a user prompt that includes caption, visual facts (parsed or provided), and the chosen reference. It calls the OpenAI Responses API with a JSON schema (strict mode) using exponential backoff on transient errors and a per-request timeout. Model output is parsed from `output_text`, then validated with sanity checks for required sections, visual-fact usage, length ratio, and weak phrasing. For each valid response it replaces `rejected`, attaches minimal `rejected_meta`, streams JSONL output, logs progress, and aborts on any API or sanity failure (currently with a debug limit at 5 records).

@@ -31,7 +31,9 @@ class Logistics:
     splits: List[str] = field(
         default_factory=lambda: ["train", "validation", "test"]
     )
-
+    
+    seed: int = 42
+    teacher_model: str = "gpt-5.2"
     langs: List[str] = field(default_factory=lambda: ["en", "zh"])
     infer_bathc_size:int = 4
     gen_max_token:int = 384
@@ -253,3 +255,13 @@ def build_cfg(model_name_or_path: str) -> dict:
             "max_new_tokens": 8,
         },
     }
+
+
+
+@dataclass
+class Stats:
+    total: int = 0
+    ok: int = 0
+    failed_schema: int = 0
+    failed_sanity: int = 0
+    api_errors: int = 0

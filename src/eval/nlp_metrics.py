@@ -205,6 +205,6 @@ def compute_malformed_outputs(files: Optional[Dict[str, List[str]]] = None):
         print(f"failed to compute malformed output metrics: {e}")    
         raise e
 
-if __name__ == "__main__":
-    # compute_bert_metrics()
-    compute_malformed_outputs()
+# if __name__ == "__main__":
+#     # compute_bert_metrics()
+#     compute_malformed_outputs()
