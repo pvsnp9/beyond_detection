@@ -13,40 +13,37 @@ class Queries:
 
     EXPLANATION_QUERIES: list[str] = field(
         default_factory=lambda: [
-            "Provide a step-by-step reasoning trace of why this post is sarcastic.",
+            "Provide a step-by-step reasoning trace of why this post is sarcastic or non-sarcastic.",
             "Map the visual facts of this image to the caption to explain the sarcasm.",
             "Identify the specific visual cues that make this caption sarcastic."
         ]
     )
 
-    CONDITIONAL_QUERIES: list[str] = field(
-        default_factory=lambda: [
-            "Is this sarcastic? If yes, explain why. If not, say no.",
-            "Is it sarcastic? Explain only if it is sarcastic.",
-            "Tell me if this is sarcastic, and explain the reason only if the answer is yes."
-        ]
-    )
 
-    # Define the concise universal system prompt.
-    SYSTEM_PROMPT: str = (
-        "Role: Expert Multimodal Sarcasm Analyst.\n"
-        "Task: Analyze image-caption pairs for sarcasm via cross-modal incongruity.\n"
-        "Output: Return ONLY a valid JSON object. No markdown, no filler.\n\n"
-        "JSON Schema:\n"
-        "{\n"
-        '  "label": "sarcastic" | "non_sarcastic",\n'
-        '  "need_explanation": true | false,\n'
-        '  "visual_facts": [{"id": int, "fact": "str"}],\n'
-        '  "evidence_fact_ids": [int],\n'
-        '  "incongruity": "str",\n'
-        '  "explanation": "str"\n'
-        "}\n\n"
-        "Rules:\n"
-        "1. Identify objective `visual_facts` first.\n"
-        '2. If no sarcasm exists, `incongruity` must be "".\n'
-        "3. `evidence_fact_ids` must map to `visual_facts` IDs.\n"
-        "4. If `need_explanation` is false, return empty visual reasoning fields."
-    )
+SYSTEM_PROMPT: str = (
+    "Role: Expert Multimodal Sarcasm Analyst.\n"
+    "Task: Judge sarcasm in image+caption via cross-modal incongruity.\n"
+    "Output: ONLY one valid JSON object (no markdown, no extra text).\n\n"
+    "Schema:\n"
+    "{\n"
+    '  "label": "sarcastic" | "non_sarcastic",\n'
+    '  "need_explanation": true | false,\n'
+    '  "visual_facts": [{"id": int, "fact": "str"}],\n'
+    '  "evidence_fact_ids": [int],\n'
+    '  "incongruity": "str",\n'
+    '  "explanation": "str"\n'
+    "}\n\n"
+    "Rules:\n"
+    "1) visual_facts: 2-4 directly observable facts; ids are consecutive starting at 0.\n"
+    "2) evidence_fact_ids: subset of visual_facts ids used to support the decision.\n"
+    '3) label="sarcastic" only if caption’s intended meaning conflicts with visual facts (irony/mockery/exaggeration); else "non_sarcastic".\n'
+    '4) incongruity: "" if non_sarcastic; otherwise describe the specific mismatch (caption literal meaning vs visual reality).\n'
+    "5) explanation: if sarcastic, justify using evidence_fact_ids; if non_sarcastic, brief alignment statement.\n"
+    '6) If need_explanation=false: visual_facts=[], evidence_fact_ids=[], incongruity="", explanation="".\n'
+    "7) Strict JSON: double quotes, no trailing commas, no extra keys."
+)
+
+
 
 NON_SARC_EXPLANATION_TEMPLATES = [
     "The caption is meant literally and matches the image content. There's no contradiction or hidden meaning, so it's non-sarcastic.",

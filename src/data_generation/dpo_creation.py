@@ -8,6 +8,12 @@ from typing import Any, Dict, Iterable, List
 
 from config.logistics import Logistics
 
+"""
+RUN THIS SCRIPT TO CLEAN DPO RECORDS IN-PLACE. 
+It will back up the original split files as .bak before writing cleaned versions, and attempt to restore.
+only after once we have the processed DPO files from combined dir. 
+"""
+
 
 TAG_RE = re.compile(r"[#@]([A-Za-z0-9_-]+)")
 WORD_RE = re.compile(r"[A-Za-z0-9_-]+")

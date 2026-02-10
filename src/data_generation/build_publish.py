@@ -166,7 +166,11 @@ def build_save_hf_formatted_sft_dataset(lang: str):
             raw_rows = read_jsonl(split_path)
             sft_rows = []
             for raw in raw_rows:
-                sft_rows.extend(build_sft_rows_from_raw(raw))
+                record = build_sft_rows_from_raw(raw)
+                if record:
+                    sft_rows.extend(record)
+                else:
+                    print(f"Warning: Failed to build SFT row for record ID: {raw.get('id')}")
 
             out_path = os.path.join(out_dir, f"{split}.jsonl")
             with open(out_path, "w", encoding="utf-8") as f:
@@ -292,7 +296,15 @@ def publish_sft_dataset_to_hf():
 
                 rows = read_jsonl(split_path)
                 if rows:
-                    data_dict = {k: [row.get(k) for row in rows] for k in rows[0].keys()}
+                    data_dict = {}
+                    for key in features.keys():
+                        if key in ("quality_flags", "visual_facts"):
+                            data_dict[key] = [
+                                row.get(key, []) if isinstance(row.get(key, []), list) else []
+                                for row in rows
+                            ]
+                        else:
+                            data_dict[key] = [row.get(key) for row in rows]
                 else:
                     data_dict = {k: [] for k in features.keys()}
                 datasets_by_split[split] = Dataset.from_dict(data_dict, features=features)
@@ -317,10 +329,9 @@ def publish_sft_dataset_to_hf():
     #build_create_combined_sft(langs=['en', 'zh'])
     #build_create_combined_dpo(langs=['en', 'zh'])
     # for lang in logistics.langs:
-        #print(f"Processing SFT dataset for language: {lang}")
-        #build_save_hf_formatted_sft_dataset(lang)
+    #     print(f"Processing SFT dataset for language: {lang}")
+    #     build_save_hf_formatted_sft_dataset(lang)
         #print(f"Processing DPO dataset for language: {lang}")
-        # #filter_dpo_ds_for_keep_records(lang)
         #build_save_hf_formatted_dpo_dataset(lang)
     # publish_sft_dataset_to_hf()
 

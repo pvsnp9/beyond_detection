@@ -206,5 +206,5 @@ def compute_malformed_outputs(files: Optional[Dict[str, List[str]]] = None):
         raise e
 
 # if __name__ == "__main__":
-#     # compute_bert_metrics()
-#     compute_malformed_outputs()
+    # compute_bert_metrics()
+    # compute_malformed_outputs()

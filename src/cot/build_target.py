@@ -1,8 +1,10 @@
 import json
+import re
 from typing import Any, Dict, List
 import random
 from config.queries import Queries, NON_SARC_EXPLANATION_TEMPLATES
 from datasets import Features, Value, Sequence, Image, ClassLabel
+from src.data_generation.dpo_creation import MENTION_RE, WORD_RE, SARCASTIC_TAGS, OTHER_TAGS
 
 quries = Queries()
 
@@ -65,6 +67,10 @@ def build_target_label_only(
 
 
 def build_sft_rows_from_raw(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = clean_sft_record(raw)
+    if not raw:
+        return [] 
+    
     teacher = raw["teacher"]
     label_gt = label_to_str(raw["label"])
     caption = raw["caption"]
@@ -82,6 +88,7 @@ def build_sft_rows_from_raw(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         "language": language,
         "source": source,
         "quality_flags": quality_flags,
+        "visual_facts": teacher.get("visual_facts", []),
         "teacher": json.dumps(teacher, ensure_ascii=False)
     }
 
@@ -138,5 +145,104 @@ def get_hf_sft_features() -> Features:
         "language": Value("string"),
         "source": Value("string"),
         "quality_flags": Sequence(Value("string")),
+        "visual_facts": Sequence(Value("string")),
         "teacher": Value("string"),
     })
+
+
+
+def clean_sft_record(reord: Dict[str, Any]):
+    try:
+        record = reord
+        if not isinstance(record, dict):
+            return None
+
+        teacher = record.get("teacher", {})
+        if not isinstance(teacher, dict):
+            teacher = {}
+        
+        lang = teacher.get("language", "")
+        if lang == "" or lang == "zh": return record
+
+        disallowed_tags = set(SARCASTIC_TAGS) | set(OTHER_TAGS)
+        hashtag_re = re.compile(r"#([A-Za-z0-9_-]+)")
+
+        def _normalize_tag(tag: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", tag.lower())
+
+        def _mask_mentions(text: str) -> str:
+            def _mask(match: re.Match[str]) -> str:
+                token = match.group(1)
+                if _normalize_tag(token) in disallowed_tags:
+                    return ""
+                return "@HANDLE"
+
+            return MENTION_RE.sub(_mask, text)
+
+        def _remove_disallowed_tokens(text: str) -> str:
+            tokens = WORD_RE.findall(text)
+            for token in set(tokens):
+                if _normalize_tag(token) in disallowed_tags:
+                    text = re.sub(rf"(?i)(?<!\\w){re.escape(token)}(?!\\w)", "", text)
+            return text
+
+        def _contains_disallowed_or_handles(text: str) -> bool:
+            if MENTION_RE.search(text):
+                return True
+            for token in WORD_RE.findall(text):
+                if _normalize_tag(token) in disallowed_tags:
+                    return True
+            return False
+
+        caption = record.get("caption", "")
+        if not isinstance(caption, str):
+            caption = str(caption)
+
+        caption = _mask_mentions(caption)
+        caption = hashtag_re.sub(
+            lambda match: "" if _normalize_tag(match.group(1)) in disallowed_tags else match.group(1),
+            caption,
+        )
+        caption = _remove_disallowed_tokens(caption)
+        caption = caption.replace("#", "")
+        caption = re.sub(r"\s+", " ", caption).strip()
+        if len(caption) < 5:
+            return None
+        record["caption"] = caption
+
+
+        visual_facts = teacher.get("visual_facts", [])
+        if isinstance(visual_facts, list):
+            visual_facts_text = " ".join(str(fact) for fact in visual_facts)
+        else:
+            visual_facts_text = str(visual_facts)
+        if visual_facts_text and _contains_disallowed_or_handles(visual_facts_text):
+            return None
+        cleaned_visual_facts: List[str] = []
+        if isinstance(visual_facts, list):
+            for fact in visual_facts:
+                fact_text = str(fact)
+                fact_text = _mask_mentions(fact_text)
+                fact_text = hashtag_re.sub(
+                    lambda match: "" if _normalize_tag(match.group(1)) in disallowed_tags else match.group(1),
+                    fact_text,
+                )
+                fact_text = _remove_disallowed_tokens(fact_text)
+                fact_text = fact_text.replace("#", "")
+                fact_text = re.sub(r"\s+", " ", fact_text).strip()
+                if fact_text:
+                    cleaned_visual_facts.append(fact_text)
+        teacher["visual_facts"] = cleaned_visual_facts
+
+        for key in ("text_literal", "incongruity", "explanation"):
+            value = teacher.get(key)
+            if isinstance(value, str):
+                cleaned_value = _mask_mentions(value)
+                cleaned_value = cleaned_value.replace("#", "")
+                cleaned_value = re.sub(r"\s+", " ", cleaned_value).strip()
+                teacher[key] = cleaned_value
+
+        record["teacher"] = teacher
+        return record
+    except Exception:
+        return None

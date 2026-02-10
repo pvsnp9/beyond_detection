@@ -20,15 +20,37 @@ def _now() -> str:
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    exclude_ids: set[str] = set()
+    completed_path = path.parent / "complete_train.jsonl"
+    if completed_path.exists():
+        with completed_path.open("r", encoding="utf-8") as f:
+            for i, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to parse JSON on line {i} in {completed_path}: {e}"
+                    ) from e
+                rid = str(rec.get("id", "")).strip()
+                if rid:
+                    exclude_ids.add(rid)
+
     with path.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
+                rec = json.loads(line)
             except Exception as e:
                 raise RuntimeError(f"Failed to parse JSON on line {i} in {path}: {e}") from e
+            rid = str(rec.get("id", "")).strip()
+            if rid and rid in exclude_ids:
+                continue
+            rows.append(rec)
     return rows
 
 
@@ -122,7 +144,7 @@ def sanity_check_rejected_payload(payload: Dict[str, Any], chosen_text: str) -> 
         r_len = approx_len(txt)
         ratio = r_len / c_len
         if ratio < 0.8 or ratio > 1.2:
-            print(f"DEBUG: chosen_len={c_len} rejected_len={r_len} ratio={ratio:.2f}")
+            print(f"DEBUG: chosen_len={c_len} rejected_len={r_len} ratio={ratio:.2f}", flush=True)
             # return False, f"length_ratio_out_of_range:{ratio:.2f}"
 
         # forbid common weak rejected pattern
@@ -233,8 +255,6 @@ def main() -> None:
             raise FileNotFoundError(f"Input not found: {in_path}")
 
         out_path = in_path.parent / out_file
-
-
         api_key = os.getenv("OPENAI_API_KEY") 
         if not api_key:
             raise EnvironmentError("OPENAI_API_KEY is not set.")
@@ -246,13 +266,13 @@ def main() -> None:
 
         client = OpenAI(api_key=api_key)
 
-        print(f"[{_now()}] Loaded {stats.total} rows from {in_path}")
-        print(f"[{_now()}] Writing output to {out_path}")
-        print(f"[{_now()}] Model: {logistics.teacher_model}")
-        print(f"[{_now()}] Using uniform error_type over: {ALLOWED_ERROR_TYPES}")
+        print(f"[{_now()}] Loaded {stats.total} rows from {in_path}", flush=True)
+        print(f"[{_now()}] Appending output to {out_path}", flush=True)
+        print(f"[{_now()}] Model: {logistics.teacher_model}", flush=True)
+        print(f"[{_now()}] Using uniform error_type over: {ALLOWED_ERROR_TYPES}", flush=True)
 
-        failed_path = out_path.parent / "failed_data.jsonl"
-        with out_path.open("w", encoding="utf-8") as fout, failed_path.open("w", encoding="utf-8") as ffail:
+        failed_path = out_path.parent / "failed.jsonl"
+        with out_path.open("a", encoding="utf-8") as fout, failed_path.open("w", encoding="utf-8") as ffail:
             for idx, rec in enumerate(rows, start=1):
                 rid = str(rec.get("id", "")).strip() or f"line_{idx}"
                 chosen_text = (rec.get("chosen") or "").strip()
@@ -272,8 +292,15 @@ def main() -> None:
                     )
                 except Exception as e:
                     stats.api_errors += 1
-                    print(f"[{_now()}] API_ERROR id={rid} line={idx}: {e}", file=sys.stderr)
-                    raise
+                    print(f"[{_now()}] API_ERROR id={rid} line={idx}: {e}", file=sys.stderr, flush=True)
+                    dump_jsonl_line(
+                        ffail,
+                        {
+                            "id": rid,
+                            "reason": f"api_error:{e}",
+                        },
+                    )
+                    continue
 
                 # Schema sanity checks
                 ok, reason = sanity_check_rejected_payload(payload, chosen_text=chosen_text)
@@ -283,6 +310,7 @@ def main() -> None:
                         f"[{_now()}] SANITY_FAIL id={rid} line={idx} reason={reason} "
                         f"error_type_requested={error_type}",
                         file=sys.stderr,
+                        flush=True,
                     )
                     dump_jsonl_line(
                         ffail,
@@ -315,20 +343,20 @@ def main() -> None:
                     print(
                         f"[{_now()}] Progress {idx}/{stats.total} ({pct:.1f}%) | "
                         f"ok={stats.ok} api_err={stats.api_errors} sanity_fail={stats.failed_sanity}"
-                    )
+                    , flush=True)
 
-        print("\n=== DONE ===")
-        print(f"Input:  {in_path}")
-        print(f"Output: {out_path}")
-        print(f"Total: {stats.total}")
-        print(f"OK:    {stats.ok}")
-        print(f"API errors:      {stats.api_errors}")
-        print(f"Sanity failures: {stats.failed_sanity}")
+        print("\n=== DONE ===", flush=True)
+        print(f"Input:  {in_path}", flush=True)
+        print(f"Output: {out_path}", flush=True)
+        print(f"Total: {stats.total}", flush=True)
+        print(f"OK:    {stats.ok}", flush=True)
+        print(f"API errors:      {stats.api_errors}", flush=True)
+        print(f"Sanity failures: {stats.failed_sanity}", flush=True)
 
     except Exception as e:
-        # Production-grade: log and re-raise (do not suppress)
-        print(f"[{_now()}] FATAL: {e}", file=sys.stderr)
-        raise
+        # Production-grade: log and stop (do not suppress)
+        print(f"[{_now()}] FATAL: {e}", file=sys.stderr, flush=True)
+        return
 
 
 if __name__ == "__main__":

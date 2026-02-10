@@ -116,6 +116,7 @@ def _get_hf_config(dataset_id: str, lang: Optional[str]) -> Optional[str]:
     return None
 
 
+# checks original HS sets
 def check_hf_split_overlaps(logistics: Logistics) -> None:
     if load_dataset is None:
         print("Skipping HF overlap check: datasets package is not installed.")
@@ -155,9 +156,9 @@ def main() -> None:
     logistics = Logistics()
     for lang in logistics.langs:
         verify_language(lang, logistics, "sft")
-        verify_language(lang, logistics, "dpo")
+        # verify_language(lang, logistics, "dpo")
     # check_hf_split_overlaps(logistics)
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

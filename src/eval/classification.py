@@ -193,13 +193,13 @@ def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[s
 
 
 # if __name__ == "__main__":
-    gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
+    # gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
     # #code for merging explanation and detection_explanation files into one detection_explanation file
     # for model_name, files in gen_files.items():
     #     print(f"Processing model: {model_name} with files: {files}")
-    #     if len(files) >= 2:
-    #         merge_files(files)
-    #     else: print(f"Not enough files to merge for model: {model_name}")
-    #     print("-----"*20)
+        # if len(files) >= 2:
+        #     merge_files(files)
+        # else: print(f"Not enough files to merge for model: {model_name}")
+        # print("-----"*20)
     
     # compute_f1(gen_files)
