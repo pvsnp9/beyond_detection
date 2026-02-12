@@ -39,6 +39,12 @@ def main() -> None:
     cfg = build_cfg(ModelCards().llama3_2vl)
     set_seed(cfg["sft"].seed)
     cfg["mode"] = "rationale_sft"
+
+    # these changing since we use A100 80G
+    cfg["sft"].batch_size = 8
+    cfg["sft"].gradient_accumulation_steps = 8 #64 batch
+    cfg["sft"].lr = 2e-4
+    
     resolved = resolve_tokens_and_env(cfg["logistics"])
     set_runtime_env(resolved)
 

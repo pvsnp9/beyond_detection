@@ -272,7 +272,7 @@ def main() -> None:
         print(f"[{_now()}] Using uniform error_type over: {ALLOWED_ERROR_TYPES}", flush=True)
 
         failed_path = out_path.parent / "failed.jsonl"
-        with out_path.open("a", encoding="utf-8") as fout, failed_path.open("w", encoding="utf-8") as ffail:
+        with out_path.open("a", encoding="utf-8") as fout, failed_path.open("a", encoding="utf-8") as ffail:
             for idx, rec in enumerate(rows, start=1):
                 rid = str(rec.get("id", "")).strip() or f"line_{idx}"
                 chosen_text = (rec.get("chosen") or "").strip()
@@ -358,6 +358,3 @@ def main() -> None:
         print(f"[{_now()}] FATAL: {e}", file=sys.stderr, flush=True)
         return
 
-
-if __name__ == "__main__":
-    main()

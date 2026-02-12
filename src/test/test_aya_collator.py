@@ -304,7 +304,7 @@ def main() -> None:
                     f"invalid_image_sample idx={idx} id={sample_id} shape={shape} keys={keys} err={exc}"
                 )
 
-        # ✅ TRAIN collator (HF version)
+        
         train_collator = AyaVisionSFTCollator(
             processor=processor,
             training=True,
@@ -382,7 +382,7 @@ def main() -> None:
             print("label_tokens_decoded=")
             print("<none>")
 
-        # ✅ INFER collator (HF version)
+        
         infer_collator = AyaVisionSFTCollator(
             processor=processor,
             training=False,

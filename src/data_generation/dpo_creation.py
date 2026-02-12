@@ -59,6 +59,12 @@ PLAIN_TAG_TOKENS = {
     "humor",
     "funnypics",
     "sarcasticquotes",
+    "haha",
+    "hahaha",
+    "hehe",
+    "hehehe",
+    "hihi",
+    "hoho",
 }
 
 

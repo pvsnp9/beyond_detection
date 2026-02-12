@@ -19,29 +19,30 @@ class Queries:
         ]
     )
 
+    DPO_QUERY: str = "Does the visual context support or contradict the literal meaning of the caption?"
 
-SYSTEM_PROMPT: str = (
-    "Role: Expert Multimodal Sarcasm Analyst.\n"
-    "Task: Judge sarcasm in image+caption via cross-modal incongruity.\n"
-    "Output: ONLY one valid JSON object (no markdown, no extra text).\n\n"
-    "Schema:\n"
-    "{\n"
-    '  "label": "sarcastic" | "non_sarcastic",\n'
-    '  "need_explanation": true | false,\n'
-    '  "visual_facts": [{"id": int, "fact": "str"}],\n'
-    '  "evidence_fact_ids": [int],\n'
-    '  "incongruity": "str",\n'
-    '  "explanation": "str"\n'
-    "}\n\n"
-    "Rules:\n"
-    "1) visual_facts: 2-4 directly observable facts; ids are consecutive starting at 0.\n"
-    "2) evidence_fact_ids: subset of visual_facts ids used to support the decision.\n"
-    '3) label="sarcastic" only if caption’s intended meaning conflicts with visual facts (irony/mockery/exaggeration); else "non_sarcastic".\n'
-    '4) incongruity: "" if non_sarcastic; otherwise describe the specific mismatch (caption literal meaning vs visual reality).\n'
-    "5) explanation: if sarcastic, justify using evidence_fact_ids; if non_sarcastic, brief alignment statement.\n"
-    '6) If need_explanation=false: visual_facts=[], evidence_fact_ids=[], incongruity="", explanation="".\n'
-    "7) Strict JSON: double quotes, no trailing commas, no extra keys."
-)
+    SYSTEM_PROMPT: str = (
+        "Role: Expert Multimodal Sarcasm Analyst.\n"
+        "Task: Judge sarcasm in image+caption via cross-modal incongruity.\n"
+        "Output: ONLY one valid JSON object (no markdown, no extra text).\n\n"
+        "Schema:\n"
+        "{\n"
+        '  "label": "sarcastic" | "non_sarcastic",\n'
+        '  "need_explanation": true | false,\n'
+        '  "visual_facts": [{"id": int, "fact": "str"}],\n'
+        '  "evidence_fact_ids": [int],\n'
+        '  "incongruity": "str",\n'
+        '  "explanation": "str"\n'
+        "}\n\n"
+        "Rules:\n"
+        "1) visual_facts: 2-4 directly observable facts; ids are consecutive starting at 0.\n"
+        "2) evidence_fact_ids: subset of visual_facts ids used to support the decision.\n"
+        '3) label="sarcastic" only if caption’s intended meaning conflicts with visual facts (irony/mockery/exaggeration); else "non_sarcastic".\n'
+        '4) incongruity: "" if non_sarcastic; otherwise describe the specific mismatch (caption literal meaning vs visual reality).\n'
+        "5) explanation: if sarcastic, justify using evidence_fact_ids; if non_sarcastic, brief alignment statement.\n"
+        '6) If need_explanation=false: visual_facts=[], evidence_fact_ids=[], incongruity="", explanation="".\n'
+        "7) Strict JSON: double quotes, no trailing commas, no extra keys."
+    )
 
 
 

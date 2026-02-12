@@ -7,7 +7,7 @@ from src.cot.build_target import build_sft_rows_from_raw, get_hf_sft_features
 import os
 import shutil
 from datasets import Dataset, DatasetDict
-
+import random
 
 
 logistics = Logistics()
@@ -163,26 +163,26 @@ def build_save_hf_formatted_sft_dataset(lang: str):
                 print(f"[{split}] [size:0] Completed writing HF formatted SFT dataset to {out_dir}")
                 continue
 
-            raw_rows = read_jsonl(split_path)
-            sft_rows = []
-            for raw in raw_rows:
-                record = build_sft_rows_from_raw(raw)
-                if record:
-                    sft_rows.extend(record)
-                else:
-                    print(f"Warning: Failed to build SFT row for record ID: {raw.get('id')}")
-
             out_path = os.path.join(out_dir, f"{split}.jsonl")
             with open(out_path, "w", encoding="utf-8") as f:
-                for row in sft_rows:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                raw_rows = read_jsonl(split_path)
+                written = 0
+                for raw in raw_rows:
+                    record = build_sft_rows_from_raw(raw)
+                    if record:
+                        for row in record:
+                            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                            written += 1
+                    else:
+                        print(f"Warning: Failed to build SFT row for record ID: {raw.get('id')}")
 
-            print(f"[{split}] [size:{len(sft_rows)}] Completed writing HF formatted SFT dataset to {out_dir}")
+            print(f"[{split}] [size:{written}] Completed writing HF formatted SFT dataset to {out_dir}")
 
     except Exception as e:
         print(f"An error occurred while creating HF formatted dataset for language {lang}: {e}")
 
 
+# not useful 
 def build_save_hf_formatted_dpo_dataset(lang: str, dir_name:str = "dpo"):
     try:
         combined_dir = os.path.join(logistics.project_root_dir, logistics.combined_data_dir, dir_name, lang)
@@ -326,17 +326,19 @@ def publish_sft_dataset_to_hf():
 
 
 # if __name__ == "__main__":
+    # random.seed(logistics.seed)
     #build_create_combined_sft(langs=['en', 'zh'])
     #build_create_combined_dpo(langs=['en', 'zh'])
     # for lang in logistics.langs:
-    #     print(f"Processing SFT dataset for language: {lang}")
-    #     build_save_hf_formatted_sft_dataset(lang)
+        # print(f"Processing SFT dataset for language: {lang}")
+        # build_save_hf_formatted_sft_dataset(lang)
         #print(f"Processing DPO dataset for language: {lang}")
         #build_save_hf_formatted_dpo_dataset(lang)
     # publish_sft_dataset_to_hf()
 
 
 
-# Note: for DPO dataset, run filter_dpo_ds_for_keep_records(lang) 
+# Note: for DPO dataset, run filter_dpo_ds_for_keep_records(lang) # just becuase we did not filter the toxic data at the begining
+# do not run previous if we have processed/dpo or completed_train,jsonl with rejected data.
 # after combined dataset is created. (Combined -> processed/dpo (keep reocrds) )
 # then use dpo_creation clean the records (remove hastags, textual cues)

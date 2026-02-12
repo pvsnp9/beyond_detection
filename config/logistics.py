@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 
+REPLACEMENT_WORDS = {
+    "enthusiastic tone",
+    "rhetorical skepticism",
+    "contradiction",
+    "hyperbole",
+    "amusement",
+}
+
+
 @dataclass
 class Logistics:
     project_root_dir: str = "/projects/mzampier/tsuyog/beyond_detection"
@@ -39,6 +48,7 @@ class Logistics:
     gen_max_token:int = 384 #512
 
     hf_sft_ds_id: str = "alita9/beyond_sarcasm_detection_sft"
+    hf_dpo_ds_id: str = "alita9/sarcasm_understanding_dpo"
     hf_token:any = None
     wandb_token: any = None
     wandb_project: str = "sarcasm_sft"
@@ -60,6 +70,13 @@ class LocalDataDirs:
 
 @dataclass(frozen=True)
 class ModelCards:
+    model_list:List[str] =  field(default_factory=lambda: [
+        "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        "CohereLabs/aya-vision-8b",
+        "google/gemma-3-12b-it",
+        "Qwen/Qwen3-VL-8B-Instruct"
+    ])
+    
     llama3_2vl: str = "meta-llama/Llama-3.2-11B-Vision-Instruct"
     aya_model_name: str = "CohereLabs/aya-vision-8b"
     gemm3_12b: str = "google/gemma-3-12b-it"
