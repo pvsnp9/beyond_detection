@@ -38,7 +38,7 @@ def main() -> None:
     try:
         cfg = build_cfg(ModelCards().gemm3_12b)
         set_seed(cfg["sft"].seed) 
-        cfg["sft"].max_length = 1280
+        cfg["sft"].max_length = 1536
         cfg["mode"] = "rationale_sft"
         # these changing since we use A100 80G
         cfg["sft"].batch_size = 8

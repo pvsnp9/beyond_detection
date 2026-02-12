@@ -284,5 +284,5 @@ def main():
     publish_dpo_hf_data(logistics=logistics)
     
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

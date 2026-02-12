@@ -38,6 +38,7 @@ def main() -> None:
         cfg = build_cfg(ModelCards().aya_model_name)
         # set up new max_length for aya 
         cfg["sft"].max_length = ModelCards().aya_max_ength
+        cfg["sft"].max_length = 2048
         cfg["mode"] = "rationale_sft"
         # these changing since we use A100 80G
         cfg["sft"].batch_size = 8
