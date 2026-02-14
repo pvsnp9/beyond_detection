@@ -41,8 +41,8 @@ def main() -> None:
         cfg["sft"].max_length = 2048
         cfg["mode"] = "rationale_sft"
         # these changing since we use A100 80G
-        cfg["sft"].batch_size = 8
-        cfg["sft"].gradient_accumulation_steps = 8 #64 batch
+        cfg["sft"].batch_size = 4
+        cfg["sft"].gradient_accumulation_steps = 16 #64 batch
         cfg["sft"].lr = 2e-4
         
         set_seed(cfg["sft"].seed)

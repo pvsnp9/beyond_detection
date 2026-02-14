@@ -52,7 +52,9 @@ class Logistics:
     hf_token:any = None
     wandb_token: any = None
     wandb_project: str = "sarcasm_sft"
+    wandb_dpo_project: str ="sarcasn_dpo"
     wandb_tags: List[str] = field(default_factory=lambda: ["sarcasm", "sft"])
+    wandb_dpo_tags: List[str] = field(default_factory=lambda: ["sarcasm", "dpo"])
 
 @dataclass(frozen=True)
 class LocalDataDirs:
@@ -188,6 +190,51 @@ class SFTParams:
 
 
 # ------------------------------
+# DPO Parameters
+# ------------------------------
+@dataclass
+class DPOParams:
+    seed: int = 42
+    model_dir: str = "/projects/mzampier/tsuyog/beyond_detection/outputs/models"
+    num_epochs: int = 1
+    num_workers: int = 6
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.0
+    warmup_ratio: float = 0.05
+    max_grad_norm: float = 1.0
+    max_length: int = 2048
+    beta: float = 0.1
+    loss_type: str = "sigmoid"
+    fp16: bool = False
+    logging_steps: int = 10
+    save_steps: int = 100
+    eval_steps: int = 100
+    save_total_limit: int = 2
+    load_best_model_at_end: bool = True
+    metric_for_best_model: str = "eval/reward_margin"
+    greater_is_better: bool = True
+
+
+# ------------------------------
+# (Optional) DPOConfig - extras you should pass explicitly
+# ------------------------------
+@dataclass
+class DPOConfigExtras:
+    bf16: bool = True
+    tf32: bool = True
+    gradient_checkpointing: bool = True
+    use_cache: bool = False
+    use_flash_attention_2: bool = True
+    optim: str = "paged_adamw_8bit"
+    evaluation_strategy: str = "steps"
+    disable_tqdm: bool = False
+    dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = True
+    dataloader_prefetch_factor: int = 2
+
+# ------------------------------
 # (Optional) SFTConfig - extras you should pass explicitly
 # ------------------------------
 @dataclass
@@ -270,6 +317,62 @@ def build_cfg(model_name_or_path: str) -> dict:
             "temperature": 0.0,
             "top_p": 1.0,
             "max_new_tokens": 8,
+        },
+    }
+
+
+def build_dpo_cfg(model_name_or_path: str) -> dict:
+    logistics = Logistics()
+    logistics.wandb_tags.append(model_name_or_path)
+    safe_model_name = model_name_or_path.replace("/", "-")
+    run_name = f"{safe_model_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    return {
+        "logistics": logistics,
+        "qlora": QLoRAParams(),
+        "lora": LoRAParams(),
+        "dpo": DPOParams(),
+        "dpo_extras": DPOConfigExtras(),
+        "mode": "mdpo",
+        "model": {
+            "base_model_name_or_path": model_name_or_path,
+            "use_flash_attention": True,
+            "torch_dtype": "bfloat16",
+            "gradient_checkpointing": True,
+            "use_cache": False,
+        },
+        "dataset": {
+            "dataset_id": logistics.hf_dpo_ds_id,
+            "lang": "en",
+            "train_split": "train",
+            "eval_split": "validation",
+            "fallback_eval_split": "test",
+            "streaming": False,
+            "max_train_samples": None,
+            "max_eval_samples": 8,
+        },
+        "output": {
+            "adapter_output_dir": None,
+            "run_name": run_name,
+        },
+        "wandb": {
+            "project": os.environ.get("WANDB_PROJECT", logistics.wandb_dpo_project),
+            "entity": None,
+            "tags": logistics.wandb_dpo_tags,
+            "log_model": False,
+        },
+        "collator": {
+            "image_key": "image",
+            "prompt_key": "prompt",
+            "caption_key": "caption",
+            "chosen_key": "chosen",
+            "rejected_key": "rejected",
+            "system_prompt": None,
+        },
+        "eval_decode": {
+            "do_sample": False,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_new_tokens": 256,
         },
     }
 

@@ -356,6 +356,7 @@ def gemma_inference_collator(
     except Exception as e:
         print(f"failed to prep gemma message from batch: {e}")
         raise
+
 def _normalize_image(image):
     if image is None:
         raise ValueError("image is None")

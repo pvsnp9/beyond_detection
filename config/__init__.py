@@ -1,6 +1,6 @@
 """Configuration package."""
 
-from .logistics import Logistics, build_cfg
+from .logistics import Logistics, build_cfg, build_dpo_cfg
 from .queries import Queries
 
-__all__ = ["Logistics", "Queries", "build_cfg"]
+__all__ = ["Logistics", "Queries", "build_cfg", "build_dpo_cfg"]

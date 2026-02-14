@@ -4,6 +4,8 @@ from typing import Optional, Union
 
 from datasets import Dataset, DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
 
+from config.logistics import Logistics
+
 # Convenient return type alias for the datasets loader.
 DatasetLike = Union[Dataset, DatasetDict, IterableDataset, IterableDatasetDict]
 
@@ -47,3 +49,23 @@ def load_hf_dataset(
     if dataset_len is not None:
         print(f"Dataset size: {dataset_len}")
     return dataset
+
+
+def load_hf_dpo_dataset(
+    *,
+    split: Optional[str] = "train",
+    config_name: Optional[str] = None,
+    streaming: bool = False,
+    cache_dir: Optional[str] = None,
+    download_mode: Optional[str] = None,
+) -> DatasetLike:
+    """Load the default HF DPO dataset without altering its schema."""
+    logistics = Logistics()
+    return load_hf_dataset(
+        logistics.hf_dpo_ds_id,
+        split=split,
+        config_name=config_name,
+        streaming=streaming,
+        cache_dir=cache_dir,
+        download_mode=download_mode,
+    )
