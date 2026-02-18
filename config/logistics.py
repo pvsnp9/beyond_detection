@@ -196,25 +196,27 @@ class SFTParams:
 class DPOParams:
     seed: int = 42
     model_dir: str = "/projects/mzampier/tsuyog/beyond_detection/outputs/models"
-    num_epochs: int = 1
+    num_epochs: int = 2
     num_workers: int = 6
     batch_size: int = 2
+    eval_batch_size: int = 2
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.0
-    warmup_ratio: float = 0.05
+    learning_rate: float = 1e-6
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
     max_grad_norm: float = 1.0
     max_length: int = 2048
     beta: float = 0.1
     loss_type: str = "sigmoid"
     fp16: bool = False
     logging_steps: int = 10
-    save_steps: int = 100
-    eval_steps: int = 100
-    save_total_limit: int = 2
+    save_steps: int = 50
+    eval_steps: int = 50
+    save_total_limit: int = 3
     load_best_model_at_end: bool = True
     metric_for_best_model: str = "eval/reward_margin"
     greater_is_better: bool = True
+    remove_unused_columns: bool = False
 
 
 # ------------------------------
@@ -228,7 +230,7 @@ class DPOConfigExtras:
     use_cache: bool = False
     use_flash_attention_2: bool = True
     optim: str = "paged_adamw_8bit"
-    evaluation_strategy: str = "steps"
+    eval_strategy: str = "steps"
     disable_tqdm: bool = False
     dataloader_pin_memory: bool = True
     dataloader_persistent_workers: bool = True
@@ -359,10 +361,11 @@ def build_dpo_cfg(model_name_or_path: str) -> dict:
             "entity": None,
             "tags": logistics.wandb_dpo_tags,
             "log_model": False,
+            "enabled": True,
         },
         "collator": {
             "image_key": "image",
-            "prompt_key": "prompt",
+            "prompt_key": "query",
             "caption_key": "caption",
             "chosen_key": "chosen",
             "rejected_key": "rejected",

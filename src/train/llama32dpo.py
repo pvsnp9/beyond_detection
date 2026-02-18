@@ -5,12 +5,12 @@ import os
 from datetime import datetime
 
 import torch
-from transformers import BitsAndBytesConfig, set_seed, AutoProcessor
+from transformers import BitsAndBytesConfig, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from trl import DPOTrainer
 
 from config.logistics import ModelCards, build_dpo_cfg
-from src.collators.dpo_inference_collator import qwen_dpo_inference_collator
+from src.collators.dpo_inference_collator import llama_dpo_inference_collator
 from src.datasets.loader import load_dpo_train_eval_dataset
 from src.utils.env import resolve_tokens_and_env, set_runtime_env
 from src.utils.logging import init_wandb, log_run_metadata
@@ -23,9 +23,10 @@ from src.utils.mdpo_utils import (
     MDPOMetricsCallback,
     MDPOTrainMetricsCallback,
 )
-def main() -> None:
-    cfg = build_dpo_cfg(ModelCards().qwen3_vl_8b_instruct)
 
+
+def main() -> None:
+    cfg = build_dpo_cfg(ModelCards().llama3_2vl)
     set_seed(cfg["dpo"].seed)
 
     resolved = resolve_tokens_and_env(cfg["logistics"])
@@ -45,10 +46,9 @@ def main() -> None:
     adapter_output_dir = cfg["output"]["adapter_output_dir"] or os.path.join(
         cfg["dpo"].model_dir if hasattr(cfg["dpo"], "model_dir") else cfg["logistics"].models_output_dir,
         "mdpo",
-        "qwen3",
+        "llama32",
     )
     os.makedirs(adapter_output_dir, exist_ok=True)
-
 
     torch.backends.cuda.matmul.allow_tf32 = cfg["dpo_extras"].tf32
     torch.backends.cudnn.allow_tf32 = cfg["dpo_extras"].tf32
@@ -61,7 +61,7 @@ def main() -> None:
         bnb_4bit_compute_dtype=_dtype_from_str(qlora_cfg.bnb_4bit_compute_dtype),
     )
 
-    model_key = "qwen"
+    model_key = "llama"
     model, processor, sft_checkpoint, base_model_id = load_sft_adapter_models(
         model_key,
         cfg,
@@ -70,7 +70,7 @@ def main() -> None:
         trust_remote_code=True,
         use_fast=True,
     )
-    # need to freeze the model.
+
     if run is not None:
         run.config.update(
             {
@@ -83,37 +83,33 @@ def main() -> None:
         if processor.tokenizer.pad_token is None:
             processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.padding_side = "right"
+    else:
+        print("[DPO] Warning: processor.tokenizer missing; DPO preprocessing may fail.")
 
-
-
-    # get the DPO dataset 
     ds = load_dpo_train_eval_dataset(
         config_name=cfg["dataset"]["lang"],
         processor=processor,
         streaming=cfg["dataset"]["streaming"],
         cache_dir=cfg["logistics"].hf_cache_dir,
     )
-    train_dataset = ds.get('train', None)
+    train_dataset = ds.get("train", None)
     eval_dataset = ds.get("eval", None)
-    
     if train_dataset is None or eval_dataset is None:
-        print("Could not loat the DPO train/eval dataset")
+        print("Could not load the DPO train/eval dataset")
         raise RuntimeError("train or eval dataset is None")
+
     eval_dataset = _select_subset(eval_dataset, cfg["dataset"]["max_eval_samples"])
-
-
     model.config.use_cache = cfg["dpo_extras"].use_cache
 
     def prompt_collator(batch):
-        return qwen_dpo_inference_collator(
+        return llama_dpo_inference_collator(
             batch,
             mode="both",
             processor=processor,
             max_length=cfg["dpo"].max_length,
         )
-    
-    dpo_args = build_dpo_config(cfg, adapter_output_dir, run_name)
 
+    dpo_args = build_dpo_config(cfg, adapter_output_dir, run_name)
     trainer = DPOTrainer(
         model=model,
         ref_model=None,
@@ -132,6 +128,7 @@ def main() -> None:
             cfg,
         )
     )
+
     last_checkpoint = get_last_checkpoint(adapter_output_dir)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
@@ -152,8 +149,11 @@ def main() -> None:
         "config_source": "config/logistics.py",
         "timestamp": datetime.now().isoformat(),
     }
-    with open(os.path.join(adapter_output_dir, "training_meta.json"), "w") as f:
-        json.dump(training_meta, f, indent=2)
+    try:
+        with open(os.path.join(adapter_output_dir, "training_meta.json"), "w") as f:
+            json.dump(training_meta, f, indent=2)
+    except Exception as exc:
+        print(f"Failed to write training metadata: {exc}")
 
     log_run_metadata(
         cfg["logistics"],

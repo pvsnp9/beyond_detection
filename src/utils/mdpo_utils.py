@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import itertools
 
 import torch
+from peft import PeftModel, prepare_model_for_kbit_training
+from transformers import AutoProcessor, TrainerCallback
 
-from src.collators.inference_collator import qwen_inference_collator
-from src.datasets.loader import load_hf_dpo_dataset
+from src.hf.publish_lora_models import get_sft_best_model
+from src.inference.run_inference import BaseModels
 from src.utils.sft_utils import _count_trainable_params, _dtype_from_str, _get_world_size
-from transformers import TrainerCallback
 
 
 def _select_subset(dataset, max_samples: Optional[int]):
@@ -23,38 +25,14 @@ def _select_subset(dataset, max_samples: Optional[int]):
     return list(itertools.islice(dataset, max_samples))
 
 
-def load_mdpo_eval_dataset(cfg: Dict[str, Any]):
-    dataset_cfg = cfg.get("dataset", {})
-    eval_split = dataset_cfg.get("eval_split", "validation")
-    fallback_split = dataset_cfg.get("fallback_eval_split", "test")
-    config_name = dataset_cfg.get("lang")
-    cache_dir = cfg.get("logistics").hf_cache_dir
-    streaming = dataset_cfg.get("streaming", False)
-
-    try:
-        eval_dataset = load_hf_dpo_dataset(
-            split=eval_split,
-            config_name=config_name,
-            streaming=streaming,
-            cache_dir=cache_dir,
-        )
-        eval_name = eval_split
-    except Exception:
-        eval_dataset = load_hf_dpo_dataset(
-            split=fallback_split,
-            config_name=config_name,
-            streaming=streaming,
-            cache_dir=cache_dir,
-        )
-        eval_name = fallback_split
-    return eval_dataset, eval_name
-
 
 def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
     from trl import DPOConfig
 
     dpo_cfg = cfg.get("dpo", {})
     extras = cfg.get("dpo_extras", {})
+    wandb_cfg = cfg.get("wandb") or {}
+    wandb_enabled = bool(wandb_cfg.get("enabled", True)) and os.environ.get("WANDB_DISABLED") != "true"
 
     return DPOConfig(
         output_dir=output_dir,
@@ -62,6 +40,7 @@ def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
         num_train_epochs=dpo_cfg.num_epochs,
         per_device_train_batch_size=dpo_cfg.batch_size,
         gradient_accumulation_steps=dpo_cfg.gradient_accumulation_steps,
+        gradient_checkpointing=extras.gradient_checkpointing,
         learning_rate=dpo_cfg.learning_rate,
         weight_decay=dpo_cfg.weight_decay,
         warmup_ratio=dpo_cfg.warmup_ratio,
@@ -77,31 +56,21 @@ def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
         logging_steps=dpo_cfg.logging_steps,
         save_steps=dpo_cfg.save_steps,
         eval_steps=dpo_cfg.eval_steps,
+        eval_strategy=extras.eval_strategy,
         save_total_limit=dpo_cfg.save_total_limit,
         load_best_model_at_end=dpo_cfg.load_best_model_at_end,
         metric_for_best_model=dpo_cfg.metric_for_best_model,
         greater_is_better=dpo_cfg.greater_is_better,
-        evaluation_strategy=extras.evaluation_strategy,
-        report_to=["wandb"] if cfg.get("wandb") else [],
+        report_to=["wandb"] if wandb_enabled else [],
         disable_tqdm=extras.disable_tqdm,
         dataloader_num_workers=dpo_cfg.num_workers,
         dataloader_pin_memory=extras.dataloader_pin_memory,
         dataloader_persistent_workers=extras.dataloader_persistent_workers,
         dataloader_prefetch_factor=extras.dataloader_prefetch_factor,
-        remove_unused_columns=False,
+        remove_unused_columns=dpo_cfg.remove_unused_columns,
     )
 
 
-def qwen_prompt_collator(processor, max_length: Optional[int]):
-    def _collate(batch):
-        return qwen_inference_collator(
-            batch,
-            mode="both",
-            processor=processor,
-            max_length=max_length,
-        )
-
-    return _collate
 
 
 def _find_json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -218,8 +187,9 @@ def evaluate_mdpo(
 ) -> Dict[str, Any]:
     dpo_cfg = cfg.get("dpo", {})
     max_samples = cfg.get("dataset", {}).get("max_eval_samples")
-    batch_size = dpo_cfg.batch_size
+    batch_size = getattr(dpo_cfg, "eval_batch_size", None) or dpo_cfg.batch_size
 
+    was_training = model.training
     model.eval()
 
     eval_examples = _select_subset(eval_dataset, max_samples)
@@ -307,22 +277,120 @@ def evaluate_mdpo(
             _process_example(text, ex)
 
     metrics: Dict[str, Any] = {}
+    metrics["eval/num_samples"] = total
+    metrics["eval/json_valid_count"] = valid_json
     metrics["eval/json_validity"] = valid_json / max(1, total)
     metrics["eval/hallucination_rate"] = hallucinated / max(1, total)
     metrics["eval/pivot_consistency"] = pivot_ok / max(1, total)
     metrics["eval/visual_facts_id_consecutive_rate"] = consecutive_ids_ok / max(1, total)
-    metrics["eval/length_ratio_output_target"] = (
-        sum(length_ratios) / max(1, len(length_ratios)) if length_ratios else 0.0
-    )
-    metrics["eval/length_ratio_chosen_rejected"] = (
-        sum(chosen_rejected_ratios) / max(1, len(chosen_rejected_ratios))
-        if chosen_rejected_ratios
-        else 0.0
-    )
+    if length_ratios:
+        metrics["eval/length_ratio_output_target"] = sum(length_ratios) / len(length_ratios)
+    if chosen_rejected_ratios:
+        metrics["eval/length_ratio_chosen_rejected"] = (
+            sum(chosen_rejected_ratios) / len(chosen_rejected_ratios)
+        )
     for key, value in schema_errors.items():
         metrics[f"eval/schema_error_types/{key}"] = value / max(1, total)
 
+    if was_training:
+        model.train()
     return metrics
+
+
+def load_sft_adapter_models(
+    model_key: str,
+    cfg: Dict[str, Any],
+    bnb_config: Any,
+    device_map: str = "auto",
+    trust_remote_code: bool = True,
+    use_fast: bool = True,
+) -> Tuple[Any, Any, str, str]:
+    
+    models_dirs = {
+        "aya": "aya_vision_8b",
+        "llama": "llama32",
+        "gemma": "gemma3",
+        "qwen": "qwen3_vl_8b",
+    }
+
+    result = get_sft_best_model(models_dirs.get(model_key))
+    checkpoint_path = result.get("best_model_path")
+    if not checkpoint_path:
+        raise FileNotFoundError(f"no SFT checkpoint found for {model_key}")
+
+    base_models = BaseModels()
+    base_model_id = base_models.models.get(model_key)
+    if not base_model_id:
+        raise ValueError(f"unknown model_key: {model_key}")
+    
+    print(f"[DPO] Loading processor from base model: {base_model_id}")
+    processor = AutoProcessor.from_pretrained(
+        base_model_id,
+        trust_remote_code=trust_remote_code,
+        use_fast=use_fast,
+    )
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            checkpoint_path,
+            trust_remote_code=trust_remote_code,
+            use_fast=use_fast,
+        )
+        if getattr(processor, "tokenizer", None) is not None:
+            processor.tokenizer = tokenizer
+            print(f"[DPO] Attached tokenizer from: {checkpoint_path}")
+        else:
+            print("[DPO] Processor has no tokenizer attribute; using base tokenizer.")
+    except Exception as exc:
+        print(f"[DPO] Failed to load tokenizer from checkpoint; using base processor: {exc}")
+    
+    
+    model_kwargs = dict(
+        dtype=_dtype_from_str(cfg["model"]["torch_dtype"]),
+        device_map=device_map,
+        trust_remote_code=trust_remote_code,
+        quantization_config=bnb_config,
+    )
+
+    model_class = base_models.get_class(model_key)
+    print(f"[DPO] Loading base model: {base_model_id}")
+    
+    if cfg["model"]["use_flash_attention"] and cfg["dpo_extras"].use_flash_attention_2:
+        try:
+            policy_model = model_class.from_pretrained(
+                base_model_id, attn_implementation="flash_attention_2", **model_kwargs
+            )
+        except Exception as exc:
+            print(f"FlashAttention-2 unavailable, loading default attention: {exc}")
+            policy_model = model_class.from_pretrained(base_model_id, **model_kwargs)
+    else:
+        policy_model = model_class.from_pretrained(base_model_id, **model_kwargs)
+    
+
+    # Enable gradient checkpointing from DPOConfigExtras
+    if cfg["dpo_extras"].gradient_checkpointing:
+        policy_model.gradient_checkpointing_enable()
+
+    policy_model = prepare_model_for_kbit_training(policy_model)
+
+    print(f"[DPO] Attaching SFT adapter from: {checkpoint_path}")
+    policy_model = PeftModel.from_pretrained(
+        policy_model, 
+        checkpoint_path, 
+        is_trainable=True
+    )
+
+    print("\n" + "="*40)
+    print("TRAINABLE PARAMETERS STATUS:")
+    policy_model.print_trainable_parameters()
+    print("="*40 + "\n")
+
+    return policy_model, processor, checkpoint_path, base_model_id
+
+
+
+
 
 
 __all__ = [
@@ -332,9 +400,10 @@ __all__ = [
     "_select_subset",
     "build_dpo_config",
     "evaluate_mdpo",
-    "load_mdpo_eval_dataset",
-    "qwen_prompt_collator",
+    "load_sft_adapter_models",
     "MDPOMetricsCallback",
+    "MDPOTrainMetricsCallback",
+    "MDPOStepEvalCallback",
 ]
 
 
@@ -363,4 +432,56 @@ class MDPOMetricsCallback(TrainerCallback):
         )
         if metrics is not None:
             metrics.update(extra)
+        return control
+
+
+class MDPOTrainMetricsCallback(TrainerCallback):
+    def __init__(self, run: Any) -> None:
+        self.run = run
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if self.run is None or not logs:
+            return control
+        keys = ("reward", "logps", "margin", "loss", "kl", "entropy", "grad_norm", "lr")
+        filtered = {
+            k: v for k, v in logs.items() if any(t in k.lower() for t in keys)
+        }
+        if filtered:
+            self.run.log(filtered)
+        return control
+
+
+class MDPOStepEvalCallback(TrainerCallback):
+    def __init__(
+        self,
+        model: Any,
+        processor: Any,
+        eval_dataset: Any,
+        prompt_collator: Any,
+        cfg: Dict[str, Any],
+        step_interval: int,
+        run: Any,
+    ) -> None:
+        self.model = model
+        self.processor = processor
+        self.eval_dataset = eval_dataset
+        self.prompt_collator = prompt_collator
+        self.cfg = cfg
+        self.step_interval = max(1, int(step_interval))
+        self.run = run
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step <= 0:
+            return control
+        if state.global_step % self.step_interval != 0:
+            return control
+        metrics = evaluate_mdpo(
+            self.model,
+            self.processor,
+            self.eval_dataset,
+            self.prompt_collator,
+            self.cfg,
+        )
+        if self.run is not None:
+            self.run.log(metrics)
         return control

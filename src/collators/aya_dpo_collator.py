@@ -15,7 +15,7 @@ class AyaVisionDPOCollator:
         processor: Any,
         max_length: Optional[int] = None,
         image_key: str = "image",
-        prompt_key: str = "prompt",
+        prompt_key: str = "query",
         caption_key: str = "caption",
         chosen_key: str = "chosen",
         rejected_key: str = "rejected",

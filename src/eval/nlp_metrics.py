@@ -8,7 +8,7 @@ from src.eval.classification import get_latest_result_files
 from transformers import AutoProcessor
 
 
-def compute_bert_metrics():
+def compute_bert_metrics(process_explanation_only: bool = False):
     try:
         files = get_latest_result_files()
         report_dir = Path(os.path.join(Logistics().reports_dir, "expl"))
@@ -18,10 +18,13 @@ def compute_bert_metrics():
         results: Dict[str, Dict[str, Any]] = {}
         with out_path.open("w", encoding="utf-8") as out_handle:
             for model_name, model_files in files.items():
-                explanation_files = [
-                    path for path in model_files if Path(path).name == "explanation.jsonl"
+                target_filename = (
+                    "explanation.jsonl" if process_explanation_only else "merged.jsonl"
+                )
+                target_files = [
+                    path for path in model_files if Path(path).name == target_filename
                 ]
-                if not explanation_files:
+                if not target_files:
                     continue
 
                 total_sample = 0
@@ -29,7 +32,7 @@ def compute_bert_metrics():
                 bad_pred_format_count = 0
                 per_mode_pairs: Dict[str, Dict[str, List[str]]] = {}
 
-                for file_path in explanation_files:
+                for file_path in target_files:
                     print(f"Processing BERT score for model: {model_name}, file: {file_path}")
                     with open(file_path, "r", encoding="utf-8") as handle:
                         for line in handle:
@@ -205,6 +208,6 @@ def compute_malformed_outputs(files: Optional[Dict[str, List[str]]] = None):
         print(f"failed to compute malformed output metrics: {e}")    
         raise e
 
-# if __name__ == "__main__":
-    # compute_bert_metrics()
-    # compute_malformed_outputs()
+if __name__ == "__main__":
+    compute_bert_metrics()
+    compute_malformed_outputs()
