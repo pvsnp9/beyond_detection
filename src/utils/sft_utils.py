@@ -91,10 +91,10 @@ def _load_eval_dataset(cfg: Dict[str, Any]) -> Tuple[Any, str]:
             config_name=cfg["dataset"]["lang"],
             streaming=cfg["dataset"]["streaming"],
             cache_dir=cfg["logistics"].hf_cache_dir,
-            mode=cfg.get("mode")
         )
         return eval_ds, cfg["dataset"]["eval_split"]
     except Exception:
+        print(f'failed to load validation set, now falling back to {cfg["dataset"]["fallback_eval_split"]}')
         try:
             eval_ds = load_hf_dataset(
                 cfg["dataset"]["dataset_id"],
@@ -105,6 +105,7 @@ def _load_eval_dataset(cfg: Dict[str, Any]) -> Tuple[Any, str]:
             )
             return eval_ds, cfg["dataset"]["fallback_eval_split"]
         except Exception:
+            print(f'failed to load {cfg["dataset"]["fallback_eval_split"]} set as fallback, now falling back to {cfg["dataset"]["train_split"]}')
             train_ds = load_hf_dataset(
                 cfg["dataset"]["dataset_id"],
                 split=cfg["dataset"]["train_split"],

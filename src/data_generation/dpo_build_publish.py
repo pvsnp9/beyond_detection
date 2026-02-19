@@ -207,6 +207,7 @@ def create_hf_formatted_dpo_dataset(lang: str, logistics: Logistics, out_dir:str
                         "id": record.get("id"),
                         "image": record.get("local_image_path"),
                         "caption": record.get("caption"),
+                        "modality": str(record.get("modality", "both")).strip().lower() if record.get("modality") else "both",
                         "prompt": Queries().DPO_QUERY,
                         "chosen": json.dumps(chosen, ensure_ascii=False),
                         "rejected": json.dumps(rejected, ensure_ascii=False),

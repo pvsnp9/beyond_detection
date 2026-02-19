@@ -93,8 +93,8 @@ class ModelCards:
         }
     )
 
-    llama_max_length:int = 1024
-    aya_max_ength: int = 2048
+    #llama_max_length:int = 1024
+    # aya_max_ength: int = 2048
 
 
 # ------------------------------
@@ -139,15 +139,15 @@ class LoRAParams:
 @dataclass
 class SFTParams:
     # Training length
-    num_epochs: int = 3                   # start with 1; go to 2 if still improving
+    num_epochs: int = 2
 
     # Dataloader
     num_workers: int = 10                 # 8–12 usually best on A100 nodes
 
     # Optimization
-    lr: float = 1e-4                      # LoRA SFT standard (2e-5 is typically too low)
-    weight_decay: float = 0.0             # adapters generally don’t need wd
-    warmup_steps: int = 0                 # use warmup_ratio instead
+    lr: float = 1e-4                      # LoRA SFT standard 
+    weight_decay: float = 0.0             
+    warmup_steps: int = 0                
     warmup_ratio: float = 0.05
     max_grad_norm: float = 1.0
 
@@ -318,7 +318,7 @@ def build_cfg(model_name_or_path: str) -> dict:
             "do_sample": False,
             "temperature": 0.0,
             "top_p": 1.0,
-            "max_new_tokens": 8,
+            "max_new_tokens": 128,
         },
     }
 

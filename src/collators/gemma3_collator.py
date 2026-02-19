@@ -15,6 +15,7 @@ class Gemma3VisionSFTCollator:
         training: bool = True,
         max_length: Optional[int] = None,
         image_key: str = "image",
+        modality_key: str = "modality",
         query_key: str = "query",
         caption_key: str = "caption",
         target_key: str = "target_json",
@@ -24,6 +25,7 @@ class Gemma3VisionSFTCollator:
         self.training = training
         self.max_length = max_length
         self.image_key = image_key
+        self.modality_key = modality_key
         self.query_key = query_key
         self.caption_key = caption_key
         self.target_key = target_key
@@ -33,14 +35,22 @@ class Gemma3VisionSFTCollator:
             if self.processor.tokenizer.pad_token is None:
                 self.processor.tokenizer.pad_token = self.processor.tokenizer.eos_token
 
-    def _user_text(self, example: Dict[str, Any]) -> str:
+    def _get_modality(self, example: Dict[str, Any]) -> str:
+        modality = (example.get(self.modality_key) or "both").strip().lower()
+        if modality not in {"both", "text", "image"}:
+            raise ValueError(f"invalid modality `{modality}`")
+        return modality
+
+    def _user_text(self, example: Dict[str, Any], modality: str = "both") -> str:
         query = (example.get(self.query_key) or "").strip()
+        if modality == "image":
+            return query
         caption = (example.get(self.caption_key) or "").strip()
         if caption:
             return f"{query}\nCAPTION: {caption}".strip()
         return query
 
-    def _user_message(self, user_text: str) -> List[Dict[str, Any]]:
+    def _user_message(self, user_text: str, modality: str = "both") -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if self.system_prompt:
             messages.append(
@@ -49,26 +59,32 @@ class Gemma3VisionSFTCollator:
                     "content": [{"type": "text", "text": self.system_prompt}],
                 }
             )
+        if modality == "text":
+            user_content = [{"type": "text", "text": user_text}]
+        else:
+            user_content = [
+                {"type": "image"},
+                {"type": "text", "text": user_text},
+            ]
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": user_text},
-                ],
+                "content": user_content,
             }
         )
         return messages
 
-    def _prompt_length(self, image: Any, prompt_text: str) -> int:
-        prompt_inputs = self.processor(
-            text=prompt_text,
-            images=[[image]],
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=self.max_length,
-        )
+    def _prompt_length(self, image: Any, prompt_text: str, modality: str = "both") -> int:
+        processor_kwargs: Dict[str, Any] = {
+            "text": prompt_text,
+            "return_tensors": "pt",
+            "padding": False,
+            "truncation": True,
+            "max_length": self.max_length,
+        }
+        if modality in {"both", "image"}:
+            processor_kwargs["images"] = [[image]]
+        prompt_inputs = self.processor(**processor_kwargs)
         return prompt_inputs["input_ids"].shape[-1]
 
     def _normalize_image(self, image: Any) -> Image.Image:
@@ -88,23 +104,37 @@ class Gemma3VisionSFTCollator:
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         try:
+            if not batch:
+                raise ValueError("empty batch")
+
             for example in batch:
-                if self.image_key not in example:
-                    raise ValueError(f"missing `{self.image_key}` in example")
+                modality = self._get_modality(example)
+                if modality in {"both", "image"} and self.image_key not in example:
+                    raise ValueError(
+                        f"missing `{self.image_key}` in `{modality}` example"
+                    )
                 if self.training:
                     target = (example.get(self.target_key) or "").strip()
                     if not target:
                         raise ValueError("missing target_json for training")
 
-            images = [self._normalize_image(example[self.image_key]) for example in batch]
-            images_per_sample = [[image] for image in images]
-            user_texts = [self._user_text(example) for example in batch]
-
+            images_per_sample: List[List[Image.Image]] = []
+            has_any_image = False
             full_texts: List[str] = []
             prompt_texts: List[str] = []
 
-            for example, user_text in zip(batch, user_texts):
-                user_messages = self._user_message(user_text)
+            for example in batch:
+                modality = self._get_modality(example)
+                user_text = self._user_text(example, modality)
+                user_messages = self._user_message(user_text, modality)
+
+                if modality in {"both", "image"}:
+                    images_per_sample.append(
+                        [self._normalize_image(example[self.image_key])]
+                    )
+                    has_any_image = True
+                else:
+                    images_per_sample.append([])
 
                 if self.training:
                     target = (example.get(self.target_key) or "").strip()
@@ -137,14 +167,17 @@ class Gemma3VisionSFTCollator:
                         )
                     )
 
-            model_inputs = self.processor(
-                text=full_texts,
-                images=images_per_sample,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-            )
+            processor_kwargs: Dict[str, Any] = {
+                "text": full_texts,
+                "return_tensors": "pt",
+                "padding": True,
+                "truncation": True,
+                "max_length": self.max_length,
+            }
+            if has_any_image:
+                processor_kwargs["images"] = images_per_sample
+
+            model_inputs = self.processor(**processor_kwargs)
 
             if self.training:
                 labels = model_inputs["input_ids"].clone()

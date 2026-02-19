@@ -31,15 +31,13 @@ from src.utils.sft_utils import (
     _select_subset,
 )
 from src.utils.env import resolve_tokens_and_env, set_runtime_env
-from src.utils.eval_sarcasm import evaluate
+from src.utils.eval_sarcasm import evaluate_llama
 from src.utils.logging import init_wandb, log_run_metadata
 
 
 def main() -> None:
     cfg = build_cfg(ModelCards().llama3_2vl)
     set_seed(cfg["sft"].seed)
-    cfg["mode"] = "rationale_sft"
-
     # these changing since we use A100 80G
     cfg["sft"].batch_size = 8
     cfg["sft"].gradient_accumulation_steps = 8 #64 batch
@@ -72,7 +70,6 @@ def main() -> None:
         config_name=cfg["dataset"]["lang"],
         streaming=cfg["dataset"]["streaming"],
         cache_dir=cfg["logistics"].hf_cache_dir,
-        mode=cfg.get("mode")
     )
     train_datasets = _select_subset(train_datasets, cfg["dataset"]["max_train_samples"])
 
@@ -216,20 +213,12 @@ def main() -> None:
         args=sft_args,
     )
     trainer.add_callback(LogCallback(sp.logging_steps))
-    # trainer.add_callback(
-    #     EvalCallback(evaluate, run, cfg, eval_dataset, eval_collator, processor)
-    # )
-
-    pre_metrics = evaluate(model, processor, eval_dataset, eval_collator, cfg)
-    if run is not None:
-        run.log({f"gen_eval/pre_{k}": v for k, v in pre_metrics.items()})
+    trainer.add_callback(
+        EvalCallback(evaluate_llama, run, cfg, eval_dataset, eval_collator, processor)
+    )
 
     last_checkpoint = get_last_checkpoint(adapter_output_dir)
     trainer.train(resume_from_checkpoint=last_checkpoint)
-
-    post_metrics = evaluate(model, processor, eval_dataset, eval_collator, cfg)
-    if run is not None:
-        run.log({f"gen_eval/post_{k}": v for k, v in post_metrics.items()})
 
     trainer.model.save_pretrained(adapter_output_dir, safe_serialization=True)
     processor.save_pretrained(adapter_output_dir)

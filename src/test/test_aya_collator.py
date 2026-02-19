@@ -15,9 +15,12 @@ def _format_full_text(
     example: dict,
     processor,
 ) -> str:
-    user_text = collator._user_text(example)
-    image = collator._normalize_image(example["image"])
-    messages = collator._messages(user_text, image)  # ✅ renamed helper
+    modality = collator._get_modality(example)
+    user_text = collator._user_text(example, modality)
+    image = None
+    if modality in {"both", "image"}:
+        image = collator._normalize_image(example["image"])
+    messages = collator._messages(user_text, image=image, modality=modality)
     target = (example.get(collator.target_key) or "").strip()
     full_messages = messages + [
         {"role": "assistant", "content": [{"type": "text", "text": target}]}
@@ -75,10 +78,55 @@ def _summarize_batch(outputs: dict, label_outputs: bool) -> None:
         print(f"input_ids_shape={tuple(input_ids.shape)}")
 
 
+def _decode_ids(ids: torch.Tensor, processor) -> str:
+    ids = ids.detach().cpu().tolist()
+    return processor.tokenizer.decode(ids, skip_special_tokens=False)
+
+
+def _decode_labels(
+    labels: torch.Tensor,
+    input_ids: torch.Tensor,
+    processor,
+    ignore_index: int = -100,
+) -> str:
+    keep = labels != ignore_index
+    kept_ids = input_ids[keep].detach().cpu().tolist()
+    pad_id = processor.tokenizer.pad_token_id
+    if pad_id is not None:
+        kept_ids = [token_id for token_id in kept_ids if token_id != pad_id]
+    return processor.tokenizer.decode(kept_ids, skip_special_tokens=False)
+
+
 def _select_samples(dataset, max_samples: int) -> List[dict]:
     if hasattr(dataset, "select"):
         return dataset.select(range(max_samples))
     return list(dataset.take(max_samples))
+
+
+def _select_samples_by_modality(
+    dataset,
+    modalities: tuple[str, ...] = ("both", "text", "image"),
+    max_scan: int = 20000,
+) -> List[dict]:
+    selected = {}
+    scanned = 0
+
+    for row in dataset:
+        scanned += 1
+        modality = (row.get("modality") or "").strip().lower()
+        if modality in modalities and modality not in selected:
+            selected[modality] = row
+        if len(selected) == len(modalities) or scanned >= max_scan:
+            break
+
+    missing = [m for m in modalities if m not in selected]
+    if missing:
+        raise ValueError(
+            f"Could not find all required modalities {modalities}. "
+            f"missing={missing}, scanned={scanned}"
+        )
+
+    return [selected[m] for m in modalities]
 
 
 def _percentile(sorted_vals: List[int], pct: float) -> int:
@@ -105,25 +153,30 @@ def compute_length_stats(
     for i, example in enumerate(dataset):
         if limit is not None and i >= limit:
             break
-        image = example["image"]
+        modality = collator._get_modality(example)
+        image = None
+        if modality in {"both", "image"}:
+            image = collator._normalize_image(example["image"])
         if hasattr(image, "size"):
             width, height = image.size
             widths.append(int(width))
             heights.append(int(height))
 
         full_text = _format_full_text(collator, example, processor)
-        inputs = processor(
-            text=full_text,
-            images=[image],
-            return_tensors="pt",
-            padding=False,
-            truncation=False,
-        )
+        processor_kwargs = {
+            "text": full_text,
+            "return_tensors": "pt",
+            "padding": False,
+            "truncation": False,
+        }
+        if image is not None:
+            processor_kwargs["images"] = [image]
+        inputs = processor(**processor_kwargs)
         full_len = int(inputs["input_ids"].shape[-1])
         lengths.append(full_len)
 
         # Estimate "text-only" length by omitting image content from the chat template
-        user_text = collator._user_text(example)
+        user_text = collator._user_text(example, modality)
         text_only_messages = []
         if collator.system_prompt:
             text_only_messages.append(
@@ -219,15 +272,20 @@ def get_max_length_from_dataset(
     for i, example in enumerate(dataset):
         if limit is not None and i >= limit:
             break
-        image = collator._normalize_image(example["image"])
+        modality = collator._get_modality(example)
+        image = None
+        if modality in {"both", "image"}:
+            image = collator._normalize_image(example["image"])
         full_text = _format_full_text(collator, example, processor)
-        inputs = processor(
-            text=full_text,
-            images=[image],
-            return_tensors="pt",
-            padding=False,
-            truncation=False,
-        )
+        processor_kwargs = {
+            "text": full_text,
+            "return_tensors": "pt",
+            "padding": False,
+            "truncation": False,
+        }
+        if image is not None:
+            processor_kwargs["images"] = [image]
+        inputs = processor(**processor_kwargs)
         full_len = int(inputs["input_ids"].shape[-1])
         if full_len > max_len:
             max_len = full_len
@@ -275,27 +333,35 @@ def main() -> None:
             config_name="en",
             cache_dir=cache_dir,
         )
-        samples = _select_samples(dataset, 4)
+        samples = _select_samples_by_modality(dataset, ("both", "text", "image"))
+        modalities = [
+            (sample.get("modality") or "").strip().lower()
+            for sample in samples
+        ]
 
         print(f"dataset_id={dataset_id}")
         print(f"samples_loaded={len(samples)}")
+        print(f"sample_modalities={modalities}")
         print(f"system_prompt={Queries().SYSTEM_PROMPT[:120]}...")
         for idx, sample in enumerate(samples):
+            modality = (sample.get("modality") or "").strip().lower()
             image = sample.get("image")
             if hasattr(image, "size") and hasattr(image, "mode"):
                 print(
-                    f"sample_image idx={idx} type=PIL size={image.size} mode={image.mode}"
+                    f"sample_image idx={idx} modality={modality} type=PIL size={image.size} mode={image.mode}"
                 )
             else:
                 shape = getattr(image, "shape", None)
                 dtype = getattr(image, "dtype", None)
                 print(
-                    f"sample_image idx={idx} type={type(image)} shape={shape} dtype={dtype}"
+                    f"sample_image idx={idx} modality={modality} type={type(image)} shape={shape} dtype={dtype}"
                 )
         for idx, sample in enumerate(samples):
             try:
                 train_collator_probe = AyaVisionSFTCollator(processor=processor, training=False)
-                _ = train_collator_probe._normalize_image(sample["image"])
+                modality = train_collator_probe._get_modality(sample)
+                if modality in {"both", "image"}:
+                    _ = train_collator_probe._normalize_image(sample["image"])
             except Exception as exc:
                 shape = getattr(sample.get("image"), "shape", None)
                 keys = list(sample.keys())
@@ -340,47 +406,72 @@ def main() -> None:
         else:
             print("warning_no_vision_token_ids_detected=True")
 
-        first = samples[0]
+        for idx, sample in enumerate(samples):
+            modality = train_collator._get_modality(sample)
+            user_text = train_collator._user_text(sample, modality)
+            image = None
+            if modality in {"both", "image"}:
+                image = train_collator._normalize_image(sample["image"])
 
-        # Prompt text (generation prompt)
-        prompt_messages = train_collator._messages(
-            train_collator._user_text(first),
-            train_collator._normalize_image(first["image"]),
-        )
-        prompt_text = processor.apply_chat_template(
-            prompt_messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        print("\nformatted_prompt_text_train=")
-        print(prompt_text)
-        prompt_proc = train_collator._apply_template([prompt_messages], add_generation_prompt=True)
-        print(f"prompt_input_ids_shape={tuple(prompt_proc['input_ids'].shape)}")
+            prompt_messages = train_collator._messages(
+                user_text,
+                image=image,
+                modality=modality,
+            )
+            user_content_types = [item["type"] for item in prompt_messages[-1]["content"]]
+            print(f"\n--- sample[{idx}] modality={modality} ---")
+            print(f"user_content_types={user_content_types}")
+            if modality == "text":
+                assert user_content_types == ["text"], "Text-only sample should omit image content."
+            else:
+                assert "image" in user_content_types, "Image-capable sample should include image content."
 
-        # Full text (includes assistant target)
-        full_text = _format_full_text(train_collator, first, processor)
-        print("\nformatted_full_text=")
-        print(full_text)
+            prompt_text = processor.apply_chat_template(
+                prompt_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            print("\nformatted_prompt_text_train=")
+            print(prompt_text)
+            prompt_proc = train_collator._apply_template([prompt_messages], add_generation_prompt=True)
+            print(f"prompt_input_ids_shape={tuple(prompt_proc['input_ids'].shape)}")
 
-        target_in_text = (first.get("target_json") or "").strip() in full_text
-        print("\ntarget_json_in_text=" + str(target_in_text))
-        assert target_in_text, "Expected target_json to be included in assistant text."
+            full_text = _format_full_text(train_collator, sample, processor)
+            print("\nformatted_full_text=")
+            print(full_text)
 
-        _print_mask_check(
-            train_outputs["labels"][0],
-            train_outputs["input_ids"][0],
-            processor,
-            ignore_index=train_collator.ignore_index,
-            vision_token_ids=vision_token_ids if train_collator.mask_vision_tokens else None,
-        )
+            target_in_text = (sample.get("target_json") or "").strip() in full_text
+            print("\ntarget_json_in_text=" + str(target_in_text))
+            assert target_in_text, "Expected target_json to be included in assistant text."
 
-        label_ids = train_outputs["labels"][0][train_outputs["labels"][0] != train_collator.ignore_index].tolist()
-        if label_ids:
-            print("\nlabel_tokens_decoded=")
-            print(processor.tokenizer.decode(label_ids, skip_special_tokens=False))
-        else:
-            print("label_tokens_decoded=")
-            print("<none>")
+            _print_mask_check(
+                train_outputs["labels"][idx],
+                train_outputs["input_ids"][idx],
+                processor,
+                ignore_index=train_collator.ignore_index,
+                vision_token_ids=vision_token_ids if train_collator.mask_vision_tokens else None,
+            )
+
+            print(f"\ndecoded_input_ids_sample{idx}=")
+            print(_decode_ids(train_outputs["input_ids"][idx], processor))
+
+            print(f"\ndecoded_labels_sample{idx}_loss_tokens_only=")
+            print(
+                _decode_labels(
+                    train_outputs["labels"][idx],
+                    train_outputs["input_ids"][idx],
+                    processor,
+                    ignore_index=train_collator.ignore_index,
+                )
+            )
+
+            label_ids = train_outputs["labels"][idx][train_outputs["labels"][idx] != train_collator.ignore_index].tolist()
+            if label_ids:
+                print("\nlabel_tokens_decoded=")
+                print(processor.tokenizer.decode(label_ids, skip_special_tokens=False))
+            else:
+                print("label_tokens_decoded=")
+                print("<none>")
 
         
         infer_collator = AyaVisionSFTCollator(
@@ -396,19 +487,30 @@ def main() -> None:
         assert "labels" not in infer_outputs, "Inference outputs should not include labels."
         assert "input_ids" in infer_outputs, "Inference outputs should include input_ids."
 
-        print("formatted_prompt_text=")
-        print(
-            processor.apply_chat_template(
-                infer_collator._messages(
-                    infer_collator._user_text(first),
-                    infer_collator._normalize_image(first["image"]),
-                ),
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        )
+        for idx, sample in enumerate(samples):
+            modality = infer_collator._get_modality(sample)
+            image = None
+            if modality in {"both", "image"}:
+                image = infer_collator._normalize_image(sample["image"])
 
-        print("assistant_output_expected=" + json.dumps(first["target_json"])[:120] + "...")
+            print(f"formatted_prompt_text_sample{idx}_modality_{modality}=")
+            print(
+                processor.apply_chat_template(
+                    infer_collator._messages(
+                        infer_collator._user_text(sample, modality),
+                        image=image,
+                        modality=modality,
+                    ),
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+
+            print(
+                f"assistant_output_expected_sample{idx}="
+                + json.dumps(sample.get("target_json", ""))[:120]
+                + "..."
+            )
 
         # max_len = get_max_length_from_dataset(dataset, train_collator, processor)
         # print(f"max_length_dataset={max_len}")

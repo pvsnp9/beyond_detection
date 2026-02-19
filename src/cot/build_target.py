@@ -15,12 +15,32 @@ from src.data_generation.dpo_creation import (
 )
 
 quries = Queries()
+MISSING_MODALITY_EXPLANATIONS = {
+    "image": (
+        "Image is missing, so I cannot compare the caption against visual context "
+        "to judge cross-modal incongruity."
+    ),
+    "text": (
+        "Caption is missing, so I cannot infer the literal meaning or intended tone "
+        "to check for cross-modal incongruity."
+    ),
+}
+UNKNOWN_EXPLANATION = "Unable to determine sarcasm from the provided information."
 
 def label_to_str(label: int) -> str:
-    return "sarcastic" if int(label) == 1 else "non_sarcastic"
+    label_int = int(label)
+    if label_int == 1:
+        return "sarcastic"
+    if label_int == 2:
+        return "unknown"
+    return "non_sarcastic"
 
 def get_label_int(label_str: str) -> int:
-    return 1 if label_str == "sarcastic" else 0
+    if label_str == "sarcastic":
+        return 1
+    if label_str == "unknown":
+        return 2
+    return 0
 
 def make_visual_fact_objects(teacher_visual_facts: List[str]) -> List[Dict[str, Any]]:
     return [{"id": i + 1, "fact": s} for i, s in enumerate(teacher_visual_facts)]
@@ -28,118 +48,138 @@ def make_visual_fact_objects(teacher_visual_facts: List[str]) -> List[Dict[str, 
 def default_evidence_ids(visual_facts_objs: List[Dict[str, Any]], k: int = 3) -> List[int]:
     return [vf["id"] for vf in visual_facts_objs[: min(k, len(visual_facts_objs))]]
 
-# Build target for label-only (detection) and explanation tasks
-def build_target_label_only(
-    *,
-    label_str: str,
-    need_explanation: bool,
-    teacher: Dict[str, Any]
-) -> Dict[str, Any]:
-    is_sarc = (label_str == "sarcastic")
 
-    # Detection-only response (no explanation requested / needed)
-    if not need_explanation:
-        return {
-            "label": label_str,
-            "need_explanation": False,
-            "visual_facts": [],
-            "evidence_fact_ids": [],
-            "text_literal": "",
-            "incongruity": "",
-            "explanation": ""
-            
-        }
-
-    # Explanation requested/needed
-    if is_sarc:
-        vfacts = make_visual_fact_objects(teacher.get("visual_facts", []))
-        return {
-            "label": "sarcastic",
-            "need_explanation": True,
-            "visual_facts": vfacts,
-            "evidence_fact_ids": default_evidence_ids(vfacts, k=3),
-            "text_literal": teacher.get("text_literal", "").strip(),
-            "incongruity": teacher.get("incongruity", "").strip(),
-            "explanation": teacher.get("explanation", "").strip()
-        }
-
-    # Non-sarcastic but explanation requested (e.g., "Explain why" queries on negatives)
-    vfacts = make_visual_fact_objects(teacher.get("visual_facts", [])[:3])
+def make_base_target(label_str: str) -> Dict[str, Any]:
     return {
-        "label": "non_sarcastic",
         "need_explanation": True,
-        "visual_facts": vfacts,
-        "evidence_fact_ids": default_evidence_ids(vfacts, k=2),
-        "text_literal": teacher.get("text_literal", "").strip(),
+        "visual_facts": [],
+        "evidence_fact_ids": [],
+        "text_literal": "",
         "incongruity": "",
-        "explanation": random.choice(NON_SARC_EXPLANATION_TEMPLATES)
+        "label": label_str,
+        "explanation": "",
+        "missing_modalities": [],
     }
 
 
+def build_target_label_only(
+    label_str: str,
+    teacher: Dict[str, Any],
+    row: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        teacher_data = teacher if isinstance(teacher, dict) else {}
+        mode_raw = row.get("modality") if isinstance(row, dict) else None
+        if not isinstance(mode_raw, str) or not mode_raw.strip():
+            print("[build_target_label_only] Missing modality in row; defaulting to both")
+            mode_norm = "both"
+        else:
+            mode_norm = mode_raw.strip().lower()
 
-def build_sft_rows_from_raw(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    raw = clean_sft_record(raw)
-    if not raw:
-        return [] 
-    
-    teacher = raw["teacher"]
-    label_gt = label_to_str(raw["label"])
-    caption = raw["caption"]
-    img_path = raw["local_image_path"]
-    source = raw.get("source", "")
-    language = teacher.get("language", "")
-    quality_flags = teacher.get("quality_flags", [])
+        if mode_norm not in {"both", "text", "image"}:
+            print(f"[build_target_label_only] Invalid modality='{mode_raw}'")
+            raise ValueError(f"Unsupported modality: {mode_raw}")
 
-    # Base dictionary for all instances of this image
-    base = {
-        "id": raw["id"],
-        "image": img_path, 
-        "caption": caption,
-        "label_gt": label_gt,
-        "language": language,
-        "source": source,
-        "quality_flags": quality_flags,
-        "visual_facts": teacher.get("visual_facts", []),
-        "teacher": json.dumps(teacher, ensure_ascii=False)
-    }
+        tg = make_base_target(label_str=label_str)
 
-    rows = []
+        if mode_norm == "text":
+            tg.update({
+                "label": "unknown",
+                "text_literal": teacher_data.get("text_literal", "").strip(),
+                "explanation": MISSING_MODALITY_EXPLANATIONS["image"],
+                "missing_modalities": ["image"],
+            })
+            return tg
 
-    # --- TASK 1: Standard Detection (Always exists) ---
-    q_det = random.choice(quries.DETECTION_QUERIES)
-    target_det = build_target_label_only(label_str=label_gt, need_explanation=False, teacher=teacher)
-    rows.append({
-        **base, 
-        "task": "detection", 
-        "query": q_det, 
-        "target_json": json.dumps(target_det, ensure_ascii=False)
-    })
+        vfacts = make_visual_fact_objects(teacher_data.get("visual_facts", []))
 
-    # --- TASK 2: Enhanced Grounding (Detection vs Explanation) ---
-    # for each example 
-    if label_gt == "sarcastic":
-        # Sarcastic: Use the Explanation Query to teach "Why"
-        q_exp = random.choice(quries.EXPLANATION_QUERIES)
-        target_exp = build_target_label_only(label_str=label_gt, need_explanation=True, teacher=teacher)
-        rows.append({
-            **base, 
-            "task": "explanation", 
-            "query": q_exp, 
-            "target_json": json.dumps(target_exp, ensure_ascii=False)
+        if mode_norm == "image":
+            tg.update({
+                "visual_facts": vfacts,
+                "evidence_fact_ids": default_evidence_ids(vfacts, k=3),
+                "label": "unknown",
+                "explanation": MISSING_MODALITY_EXPLANATIONS["text"],
+                "missing_modalities": ["text"],
+            })
+            return tg
+
+        # mode == both
+        if label_str == "sarcastic":
+            tg.update({
+                "visual_facts": vfacts,
+                "evidence_fact_ids": default_evidence_ids(vfacts, k=3),
+                "text_literal": teacher_data.get("text_literal", "").strip(),
+                "incongruity": teacher_data.get("incongruity", "").strip(),
+                "label": "sarcastic",
+                "explanation": teacher_data.get("explanation", "").strip(),
+            })
+            return tg
+
+        # Non-sarcastic explanation path keeps existing behavior.
+        if label_str == "non_sarcastic":
+            tg.update({
+                "visual_facts": vfacts,
+                "evidence_fact_ids": default_evidence_ids(vfacts, k=2),
+                "text_literal": teacher_data.get("text_literal", "").strip(),
+                "incongruity": "",
+                "label": "non_sarcastic",
+                "explanation": random.choice(NON_SARC_EXPLANATION_TEMPLATES),
+            })
+            return tg
+
+        # Unknown/other label under full modality: keep structure but mark unknown.
+        tg.update({
+            "label": "unknown",
+            "explanation": UNKNOWN_EXPLANATION,
         })
-    else:
-        remaining_det_queries = [q for q in quries.DETECTION_QUERIES if q != q_det]
-        q_det_alt = random.choice(remaining_det_queries) if remaining_det_queries else q_det
+        return tg
+    except Exception as e:
+        print(f"[build_target_label_only] Failed label={label_str}: {e}")
+        raise
+
+
+
+def build_sft_rows_from_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    record_id = raw.get("id", "<missing_id>") if isinstance(raw, dict) else "<invalid_raw>"
+    try:
+        raw = clean_sft_record(raw)
+        if not raw:
+            return {}
+
+        teacher = raw.get("teacher", {})
+        if not isinstance(teacher, dict):
+            teacher = {}
+        label_gt = label_to_str(raw["label"])
+        caption = raw["caption"]
+        img_path = raw["local_image_path"]
+        source = raw.get("source", "")
+        language = teacher.get("language", "")
+        quality_flags = teacher.get("quality_flags", [])
+
+        # Base dictionary for all instances of this image
+        base = {
+            "id": raw["id"],
+            "image": img_path, 
+            "caption": caption,
+            "modality": str(raw.get("modality", "both")).strip().lower() if raw.get("modality") else "both",
+            "language": language,
+            "source": source,
+            "quality_flags": quality_flags,
+            "visual_facts": teacher.get("visual_facts", []),
+            "teacher": json.dumps(teacher, ensure_ascii=False)
+        }
         
-        target_non_sarc_exp = build_target_label_only(label_str=label_gt, need_explanation=True, teacher=teacher)
-        rows.append({
-            **base, 
-            "task": "detection_explanation", 
-            "query": q_det_alt, 
-            "target_json": json.dumps(target_non_sarc_exp, ensure_ascii=False)
-        })
+        target = build_target_label_only(label_str=label_gt, teacher=teacher, row=raw)
+        base["label_gt"] = target.get("label", "unknown")
 
-    return rows
+        return {
+            **base, 
+            "query": quries.SFT_QUERY, 
+            "target_json": json.dumps(target, ensure_ascii=False)
+        }
+    except Exception as e:
+        print(f"[build_sft_rows_from_raw] Failed id={record_id}: {e}")
+        return {}
 
 
 def get_hf_sft_features() -> Features:
@@ -147,10 +187,10 @@ def get_hf_sft_features() -> Features:
         "id": Value("string"),
         "image": Image(),
         "caption": Value("string"),
+        "modality": Value("string"),
         "query": Value("string"),
-        "task": Value("string"),
         "target_json": Value("string"),
-        "label_gt": ClassLabel(names=["non_sarcastic", "sarcastic"]),
+        "label_gt": ClassLabel(names=["non_sarcastic", "sarcastic", "unknown"]),
         "language": Value("string"),
         "source": Value("string"),
         "quality_flags": Sequence(Value("string")),
@@ -164,10 +204,11 @@ def get_hf_dpo_features()-> Features:
         "id": Value("string"),
         "image": Image(), 
         "caption": Value("string"),
+        "modality": Value("string"),
         "prompt": Value("string"),
         "chosen": Value("string"),
         "rejected": Value("string"),
-        "label_gt": ClassLabel(names=["non_sarcastic", "sarcastic"]),
+        "label_gt": ClassLabel(names=["non_sarcastic", "sarcastic", "unknown"]),
         "language": Value("string"),
         "source": Value("string"),
         "quality_flags": Sequence(Value("string")),

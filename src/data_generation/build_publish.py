@@ -8,6 +8,7 @@ import os
 import shutil
 from datasets import Dataset, DatasetDict
 import random
+from typing import Any, Dict, List
 
 
 logistics = Logistics()
@@ -144,6 +145,7 @@ def build_create_combined_dpo(langs: list[str] = ["en"], splits: list[str] = ["t
 
 #ends here 
 
+
 def build_save_hf_formatted_sft_dataset(lang: str):
     try:
         # read the combined dataset from local path for given lang
@@ -166,13 +168,13 @@ def build_save_hf_formatted_sft_dataset(lang: str):
             out_path = os.path.join(out_dir, f"{split}.jsonl")
             with open(out_path, "w", encoding="utf-8") as f:
                 raw_rows = read_jsonl(split_path)
+                stratified_data = stratify_sft_data(raw_rows)
                 written = 0
-                for raw in raw_rows:
+                for raw in stratified_data:
                     record = build_sft_rows_from_raw(raw)
                     if record:
-                        for row in record:
-                            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                            written += 1
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        written += 1
                     else:
                         print(f"Warning: Failed to build SFT row for record ID: {raw.get('id')}")
 
@@ -181,6 +183,128 @@ def build_save_hf_formatted_sft_dataset(lang: str):
     except Exception as e:
         print(f"An error occurred while creating HF formatted dataset for language {lang}: {e}")
 
+
+# returns 70-15-15 (both-text-image) stratified data 
+def stratify_sft_data(
+    data: List[Dict[str, Any]],
+    seed: int = 42,
+    image_key: str = "local_image_path",
+    caption_key: str = "caption",
+) -> List[Dict[str, Any]]:
+    try:
+        rng = random.Random(seed)
+        n = len(data)
+        if n == 0:
+            return []
+
+        n_both = round(0.70 * n)
+        n_text = round(0.15 * n)
+        n_image = n - n_both - n_text
+        targets = {"both": n_both, "text": n_text, "image": n_image}
+
+        def _has_caption(item: Dict[str, Any]) -> bool:
+            value = item.get(caption_key)
+            return isinstance(value, str) and value.strip() != ""
+
+        def _has_image(item: Dict[str, Any]) -> bool:
+            value = item.get(image_key)
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return value.strip() != ""
+            return value != ""
+
+        all_indices = list(range(n))
+        both_pool = [idx for idx, row in enumerate(data) if _has_caption(row) and _has_image(row)]
+        text_pool = [idx for idx, row in enumerate(data) if _has_caption(row)]
+        image_pool = [idx for idx, row in enumerate(data) if _has_image(row)]
+        both_set = set(both_pool)
+        text_set = set(text_pool)
+        image_set = set(image_pool)
+        valid_pool = {
+            "both": both_pool,
+            "text": text_pool,
+            "image": image_pool,
+        }
+
+        assigned: set[int] = set()
+        chosen: Dict[str, List[int]] = {"both": [], "text": [], "image": []}
+
+        def _sample_from(pool: List[int], k: int) -> List[int]:
+            if k <= 0:
+                return []
+            candidates = [idx for idx in pool if idx not in assigned]
+            if not candidates:
+                return []
+            take = min(k, len(candidates))
+            picked = rng.sample(candidates, take)
+            assigned.update(picked)
+            return picked
+
+        # Primary allocation per target pool.
+        chosen["both"].extend(_sample_from(both_pool, targets["both"]))
+        chosen["text"].extend(_sample_from(text_pool, targets["text"]))
+        chosen["image"].extend(_sample_from(image_pool, targets["image"]))
+
+        def _backfill(modality: str) -> None:
+            missing = targets[modality] - len(chosen[modality])
+            if missing <= 0:
+                return
+
+            # First fallback: both-capable samples.
+            topup = _sample_from(both_pool, missing)
+            chosen[modality].extend(topup)
+            missing -= len(topup)
+            if missing <= 0:
+                return
+
+            # Second fallback: rows valid for that specific modality only.
+            topup_valid = _sample_from(valid_pool[modality], missing)
+            chosen[modality].extend(topup_valid)
+
+        _backfill("both")
+        _backfill("text")
+        _backfill("image")
+
+        # Safety net for any unassigned leftovers based on eligibility.
+        modality_by_index: Dict[int, str] = {}
+        for modality in ("both", "text", "image"):
+            for idx in chosen[modality]:
+                modality_by_index[idx] = modality
+        for idx in all_indices:
+            if idx not in modality_by_index:
+                if idx in both_set:
+                    modality_by_index[idx] = "both"
+                elif idx in text_set:
+                    modality_by_index[idx] = "text"
+                elif idx in image_set:
+                    modality_by_index[idx] = "image"
+                else:
+                    print(
+                        "[stratify_sft_data] Warning: index "
+                        f"{idx} is not eligible for text/image pools; defaulting to both"
+                    )
+                    modality_by_index[idx] = "both"
+
+        output: List[Dict[str, Any]] = []
+        for idx, original in enumerate(data):
+            item = dict(original)
+            item["modality"] = modality_by_index[idx]
+            output.append(item)
+
+        both_count = sum(1 for row in output if row.get("modality") == "both")
+        text_count = sum(1 for row in output if row.get("modality") == "text")
+        image_count = sum(1 for row in output if row.get("modality") == "image")
+        print(
+            "[stratify_sft_data] modality counts "
+            f"both={both_count}, text={text_count}, image={image_count}, total={len(output)}"
+        )
+
+        rng.shuffle(output)
+        return output
+    except Exception as e:
+        print(f"erro while stratifying data: {e}")
+        raise
 
 # not useful 
 def build_save_hf_formatted_dpo_dataset(lang: str, dir_name:str = "dpo"):
@@ -280,8 +404,9 @@ def filter_dpo_ds_for_keep_records(lang: str):
         raise
 
 
-def publish_sft_dataset_to_hf():
+def publish_sft_dataset_to_hf(dataset_id: str | None = None):
     try:
+        target_dataset_id = (dataset_id or "").strip() or logistics.hf_sft_ds_id
         features = get_hf_sft_features()
         for lang in logistics.langs:
             out_dir = os.path.join(logistics.project_root_dir, logistics.processed_data_dir, "sft", lang)
@@ -303,8 +428,10 @@ def publish_sft_dataset_to_hf():
                                 row.get(key, []) if isinstance(row.get(key, []), list) else []
                                 for row in rows
                             ]
+                        elif key == "label_gt":
+                            data_dict[key] = [row.get(key, "unknown") for row in rows]
                         else:
-                            data_dict[key] = [row.get(key) for row in rows]
+                            data_dict[key] = [row.get(key, "") for row in rows]
                 else:
                     data_dict = {k: [] for k in features.keys()}
                 datasets_by_split[split] = Dataset.from_dict(data_dict, features=features)
@@ -313,13 +440,14 @@ def publish_sft_dataset_to_hf():
             dataset_dict = DatasetDict(datasets_by_split)
             resolved = resolve_tokens_and_env(logistics_cfg=logistics)
             dataset_dict.push_to_hub(
-                logistics.hf_sft_ds_id,
+                target_dataset_id,
                 config_name=lang,
                 token=resolved["hf_token"],
             )
-            print(f"Published SFT dataset for {lang} to {logistics.hf_sft_ds_id}")
+            print(f"Published SFT dataset for {lang} to {target_dataset_id}")
     except Exception as e: 
         print(f"An error occurred while publishing SFT datasets to HF: {e}")
+        raise 
 
 
 
@@ -327,11 +455,11 @@ def publish_sft_dataset_to_hf():
 
 # if __name__ == "__main__":
     # random.seed(logistics.seed)
-    #build_create_combined_sft(langs=['en', 'zh'])
+    # build_create_combined_sft(langs=['en', 'zh'])
     #build_create_combined_dpo(langs=['en', 'zh'])
     # for lang in logistics.langs:
-        # print(f"Processing SFT dataset for language: {lang}")
-        # build_save_hf_formatted_sft_dataset(lang)
+    #     print(f"Processing SFT dataset for language: {lang}")
+    #     build_save_hf_formatted_sft_dataset(lang)
         #print(f"Processing DPO dataset for language: {lang}")
         #build_save_hf_formatted_dpo_dataset(lang)
     # publish_sft_dataset_to_hf()

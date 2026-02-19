@@ -6,9 +6,11 @@ from typing import Any, Dict, Iterable, Optional
 import itertools
 
 import torch
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+
+LABEL_ORDER = ("not_sarcastic", "sarcastic", "unknown")
 
 
 def _normalize_label(value: Any) -> Optional[str]:
@@ -17,16 +19,27 @@ def _normalize_label(value: Any) -> Optional[str]:
     if isinstance(value, bool):
         return "sarcastic" if value else "not_sarcastic"
     if isinstance(value, (int, float)):
-        return "sarcastic" if int(value) == 1 else "not_sarcastic"
+        v = int(value)
+        if v == 0:
+            return "not_sarcastic"
+        if v == 1:
+            return "sarcastic"
+        if v == 2:
+            return "unknown"
+        return None
     text = str(value).strip().lower()
     if not text:
         return None
     if text in {"1", "true", "yes", "y", "sarcastic"}:
         return "sarcastic"
+    if text in {"2", "unknown", "unk", "uncertain", "cannot_determine", "cannot_determine_from_missing_modality"}:
+        return "unknown"
     if text in {"0", "false", "no", "n", "not_sarcastic", "nonsarcastic"}:
         return "not_sarcastic"
     if "not sarcastic" in text or "non-sarcastic" in text:
         return "not_sarcastic"
+    if "unknown" in text or "cannot determine" in text:
+        return "unknown"
     if "sarcastic" in text:
         return "sarcastic"
     return None
@@ -55,7 +68,7 @@ def _extract_gold(example: Dict[str, Any]) -> Optional[str]:
     else:
         payload = None
     if isinstance(payload, dict):
-        for key in ("sarcastic", "is_sarcastic", "sarcasm"):
+        for key in ("label", "labels", "sarcastic", "is_sarcastic", "sarcasm"):
             if key in payload:
                 return _normalize_label(payload.get(key))
     return None
@@ -63,6 +76,42 @@ def _extract_gold(example: Dict[str, Any]) -> Optional[str]:
 
 def _parse_prediction(text: str) -> Optional[str]:
     return _normalize_label(text)
+
+
+def _build_metrics(preds: Iterable[str], golds: Iterable[str]) -> Dict[str, Any]:
+    pred_list = list(preds)
+    gold_list = list(golds)
+    metrics: Dict[str, Any] = {
+        "num_eval_samples": len(gold_list),
+        "pred_dist": {label: pred_list.count(label) for label in LABEL_ORDER},
+        "gold_dist": {label: gold_list.count(label) for label in LABEL_ORDER},
+    }
+    if not gold_list:
+        return metrics
+
+    metrics["accuracy"] = accuracy_score(gold_list, pred_list)
+    metrics["macro_f1"] = f1_score(
+        gold_list,
+        pred_list,
+        labels=list(LABEL_ORDER),
+        average="macro",
+        zero_division=0,
+    )
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        gold_list,
+        pred_list,
+        labels=list(LABEL_ORDER),
+        average=None,
+        zero_division=0,
+    )
+    for idx, label in enumerate(LABEL_ORDER):
+        metrics[f"precision_{label}"] = float(precision[idx])
+        metrics[f"recall_{label}"] = float(recall[idx])
+        metrics[f"f1_{label}"] = float(f1[idx])
+        metrics[f"support_{label}"] = int(support[idx])
+
+    return metrics
 
 
 def _select_gemma_dtype(cfg: Dict[str, Any], model: Any) -> torch.dtype:
@@ -91,7 +140,7 @@ def _cast_gemma_pixel_values(
 
 
 @torch.no_grad()
-def evaluate(
+def evaluate_llama(
     model: Any,
     processor: Any,
     eval_dataset: Iterable[Dict[str, Any]],
@@ -131,7 +180,10 @@ def evaluate(
                 top_p=decode_cfg.get("top_p", 1.0),
                 max_new_tokens=decode_cfg.get("max_new_tokens", 8),
             )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(batch["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text in texts:
                 preds.append(_parse_prediction(text) or "unknown")
         for example in eval_dataset:
@@ -158,7 +210,11 @@ def evaluate(
                 top_p=decode_cfg.get("top_p", 1.0),
                 max_new_tokens=decode_cfg.get("max_new_tokens", 8),
             )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text, ex in zip(texts, batch_examples):
                 preds.append(_parse_prediction(text) or "unknown")
                 golds.append(_extract_gold(ex) or "unknown")
@@ -177,28 +233,16 @@ def evaluate(
                 top_p=decode_cfg.get("top_p", 1.0),
                 max_new_tokens=decode_cfg.get("max_new_tokens", 8),
             )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text, ex in zip(texts, batch_examples):
                 preds.append(_parse_prediction(text) or "unknown")
                 golds.append(_extract_gold(ex) or "unknown")
 
-    metrics: Dict[str, Any] = {}
-    if any(label != "unknown" for label in golds):
-        filtered = [(p, g) for p, g in zip(preds, golds) if g != "unknown"]
-        if filtered:
-            pred_labels, gold_labels = zip(*filtered)
-            metrics["accuracy"] = accuracy_score(gold_labels, pred_labels)
-            metrics["macro_f1"] = f1_score(gold_labels, pred_labels, average="macro")
-            metrics["num_eval_samples"] = len(filtered)
-            return metrics
-
-    metrics["num_eval_samples"] = len(preds)
-    metrics["pred_dist"] = {
-        "sarcastic": preds.count("sarcastic"),
-        "not_sarcastic": preds.count("not_sarcastic"),
-        "unknown": preds.count("unknown"),
-    }
-    return metrics
+    return _build_metrics(preds, golds)
 
 
 @torch.no_grad()
@@ -244,7 +288,10 @@ def evaluate_gemma(
                     top_p=decode_cfg.get("top_p", 1.0),
                     max_new_tokens=decode_cfg.get("max_new_tokens", 8),
                 )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(batch["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text in texts:
                 preds.append(_parse_prediction(text) or "unknown")
         for example in eval_dataset:
@@ -274,7 +321,11 @@ def evaluate_gemma(
                     top_p=decode_cfg.get("top_p", 1.0),
                     max_new_tokens=decode_cfg.get("max_new_tokens", 8),
                 )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text, ex in zip(texts, batch_examples):
                 preds.append(_parse_prediction(text) or "unknown")
                 golds.append(_extract_gold(ex) or "unknown")
@@ -296,28 +347,16 @@ def evaluate_gemma(
                     top_p=decode_cfg.get("top_p", 1.0),
                     max_new_tokens=decode_cfg.get("max_new_tokens", 8),
                 )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            generated_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs["input_ids"], generated)
+            ]
+            texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
             for text, ex in zip(texts, batch_examples):
                 preds.append(_parse_prediction(text) or "unknown")
                 golds.append(_extract_gold(ex) or "unknown")
 
-    metrics: Dict[str, Any] = {}
-    if any(label != "unknown" for label in golds):
-        filtered = [(p, g) for p, g in zip(preds, golds) if g != "unknown"]
-        if filtered:
-            pred_labels, gold_labels = zip(*filtered)
-            metrics["accuracy"] = accuracy_score(gold_labels, pred_labels)
-            metrics["macro_f1"] = f1_score(gold_labels, pred_labels, average="macro")
-            metrics["num_eval_samples"] = len(filtered)
-            return metrics
-
-    metrics["num_eval_samples"] = len(preds)
-    metrics["pred_dist"] = {
-        "sarcastic": preds.count("sarcastic"),
-        "not_sarcastic": preds.count("not_sarcastic"),
-        "unknown": preds.count("unknown"),
-    }
-    return metrics
+    return _build_metrics(preds, golds)
 
 
 @torch.no_grad()
@@ -448,23 +487,7 @@ def evaluate_qwen3(
                     preds.append(_parse_prediction(text) or "unknown")
                     golds.append(_extract_gold(ex) or "unknown")
 
-        metrics: Dict[str, Any] = {}
-        if any(label != "unknown" for label in golds):
-            filtered = [(p, g) for p, g in zip(preds, golds) if g != "unknown"]
-            if filtered:
-                pred_labels, gold_labels = zip(*filtered)
-                metrics["accuracy"] = accuracy_score(gold_labels, pred_labels)
-                metrics["macro_f1"] = f1_score(gold_labels, pred_labels, average="macro")
-                metrics["num_eval_samples"] = len(filtered)
-                return metrics
-
-        metrics["num_eval_samples"] = len(preds)
-        metrics["pred_dist"] = {
-            "sarcastic": preds.count("sarcastic"),
-            "not_sarcastic": preds.count("not_sarcastic"),
-            "unknown": preds.count("unknown"),
-        }
-        return metrics
+        return _build_metrics(preds, golds)
     except Exception as exc:
         raise RuntimeError(f"evaluate_qwen3 failed: {exc}") from exc
 
@@ -611,22 +634,6 @@ def evaluate_aya(
                     preds.append(_parse_prediction(text) or "unknown")
                     golds.append(_extract_gold(ex) or "unknown")
 
-        metrics: Dict[str, Any] = {}
-        if any(label != "unknown" for label in golds):
-            filtered = [(p, g) for p, g in zip(preds, golds) if g != "unknown"]
-            if filtered:
-                pred_labels, gold_labels = zip(*filtered)
-                metrics["accuracy"] = accuracy_score(gold_labels, pred_labels)
-                metrics["macro_f1"] = f1_score(gold_labels, pred_labels, average="macro")
-                metrics["num_eval_samples"] = len(filtered)
-                return metrics
-
-        metrics["num_eval_samples"] = len(preds)
-        metrics["pred_dist"] = {
-            "sarcastic": preds.count("sarcastic"),
-            "not_sarcastic": preds.count("not_sarcastic"),
-            "unknown": preds.count("unknown"),
-        }
-        return metrics
+        return _build_metrics(preds, golds)
     except Exception as exc:
         raise RuntimeError(f"evaluate_aya failed: {exc}") from exc

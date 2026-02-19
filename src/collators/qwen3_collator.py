@@ -23,6 +23,7 @@ class Qwen3VisionSFTCollator:
         training: bool = True,
         max_length: Optional[int] = None,
         image_key: str = "image",
+        modality_key: str = "modality",
         query_key: str = "query",
         caption_key: str = "caption",
         target_key: str = "target_json",
@@ -34,6 +35,7 @@ class Qwen3VisionSFTCollator:
         self.training = training
         self.max_length = max_length
         self.image_key = image_key
+        self.modality_key = modality_key
         self.query_key = query_key
         self.caption_key = caption_key
         self.target_key = target_key
@@ -46,14 +48,22 @@ class Qwen3VisionSFTCollator:
         if tokenizer is not None and tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-    def _user_text(self, example: Dict[str, Any]) -> str:
+    def _get_modality(self, example: Dict[str, Any]) -> str:
+        modality = (example.get(self.modality_key) or "both").strip().lower()
+        if modality not in {"both", "text", "image"}:
+            raise ValueError(f"invalid modality `{modality}`")
+        return modality
+
+    def _user_text(self, example: Dict[str, Any], modality: str = "both") -> str:
         query = (example.get(self.query_key) or "").strip()
+        if modality == "image":
+            return query
         caption = (example.get(self.caption_key) or "").strip()
         if caption:
             return f"{query}\nCAPTION: {caption}".strip()
         return query
 
-    def _user_message(self, user_text: str) -> List[Dict[str, Any]]:
+    def _user_message(self, user_text: str, modality: str = "both") -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if self.system_prompt:
             messages.append(
@@ -62,13 +72,17 @@ class Qwen3VisionSFTCollator:
                     "content": [{"type": "text", "text": self.system_prompt}],
                 }
             )
+        if modality == "text":
+            user_content = [{"type": "text", "text": user_text}]
+        else:
+            user_content = [
+                {"type": "image"},
+                {"type": "text", "text": user_text},
+            ]
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": user_text},
-                ],
+                "content": user_content,
             }
         )
         return messages
@@ -135,19 +149,25 @@ class Qwen3VisionSFTCollator:
                 raise ValueError("empty batch")
 
             for example in batch:
-                if self.image_key not in example:
-                    raise ValueError(f"missing `{self.image_key}` in example")
+                modality = self._get_modality(example)
+                if modality in {"both", "image"} and self.image_key not in example:
+                    raise ValueError(
+                        f"missing `{self.image_key}` in `{modality}` example"
+                    )
                 if self.training:
                     target = (example.get(self.target_key) or "").strip()
                     if not target:
                         raise ValueError("missing target_json for training")
 
-            images = [self._normalize_image(example[self.image_key]) for example in batch]
-            user_texts = [self._user_text(example) for example in batch]
-
+            images: List[Image.Image] = []
             full_texts: List[str] = []
-            for example, user_text in zip(batch, user_texts):
-                user_messages = self._user_message(user_text)
+            for example in batch:
+                modality = self._get_modality(example)
+                user_text = self._user_text(example, modality)
+                user_messages = self._user_message(user_text, modality)
+
+                if modality in {"both", "image"}:
+                    images.append(self._normalize_image(example[self.image_key]))
 
                 if self.training:
                     target = (example.get(self.target_key) or "").strip()
@@ -171,16 +191,19 @@ class Qwen3VisionSFTCollator:
                         )
                     )
 
-            # Flat list: one image per sample
-            model_inputs = self.processor(
-                text=full_texts,
-                images=images,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                add_special_tokens=False,
-            )
+            # Flat image list aligned to image tokens in chat template order.
+            processor_kwargs: Dict[str, Any] = {
+                "text": full_texts,
+                "return_tensors": "pt",
+                "padding": True,
+                "truncation": True,
+                "max_length": self.max_length,
+                "add_special_tokens": False,
+            }
+            if images:
+                processor_kwargs["images"] = images
+
+            model_inputs = self.processor(**processor_kwargs)
             model_inputs.pop("token_type_ids", None)
 
             if self.training:

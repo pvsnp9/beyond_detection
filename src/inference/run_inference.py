@@ -190,9 +190,10 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
                                 )
                                 continue
                             for example, output in zip(batch, outputs):
+                                gt_idx = int(example.get("label_gt"))
                                 record = {
                                     "mode": mode,
-                                    "gt":"sarcastic" if int(example.get("label_gt")) == 1 else "non_sarcastic",
+                                    "gt": "sarcastic" if gt_idx == 1 else ("unknown" if gt_idx == 2 else "non_sarcastic"),
                                     "task": example.get("task"),
                                     "query": example.get("query"),
                                     "target_json": example.get("target_json"),

@@ -11,8 +11,9 @@ from src.datasets.loader import load_hf_dataset
 
 
 def _format_full_text(collator: Llama32VisionSFTCollator, example: dict, processor) -> str:
-    user_text = collator._user_text(example)
-    messages = collator._user_message(user_text)
+    modality = collator._get_modality(example)
+    user_text = collator._user_text(example, modality)
+    messages = collator._user_message(user_text, modality)
     target = (example.get(collator.target_key) or "").strip()
     full_messages = messages + [
         {"role": "assistant", "content": [{"type": "text", "text": target}]}
@@ -43,6 +44,32 @@ def _select_samples(dataset, max_samples: int) -> List[dict]:
     if hasattr(dataset, "select"):
         return dataset.select(range(max_samples))
     return list(dataset.take(max_samples))
+
+
+def _select_samples_by_modality(
+    dataset,
+    modalities: tuple[str, ...] = ("both", "text", "image"),
+    max_scan: int = 20000,
+) -> List[dict]:
+    selected = {}
+    scanned = 0
+
+    for row in dataset:
+        scanned += 1
+        modality = (row.get("modality") or "").strip().lower()
+        if modality in modalities and modality not in selected:
+            selected[modality] = row
+        if len(selected) == len(modalities) or scanned >= max_scan:
+            break
+
+    missing = [m for m in modalities if m not in selected]
+    if missing:
+        raise ValueError(
+            f"Could not find all required modalities {modalities}. "
+            f"missing={missing}, scanned={scanned}"
+        )
+
+    return [selected[m] for m in modalities]
 
 
 def _percentile(sorted_vals: List[int], pct: float) -> int:
@@ -202,6 +229,20 @@ def _print_mask_check(labels: torch.Tensor, input_ids: torch.Tensor, processor: 
     assert prompt_masked_well, "Prompt text found in trainable labels! Masking failed."
 
 
+def _decode_ids(ids: torch.Tensor, processor) -> str:
+    ids = ids.detach().cpu().tolist()
+    return processor.tokenizer.decode(ids, skip_special_tokens=False)
+
+
+def _decode_labels(labels: torch.Tensor, input_ids: torch.Tensor, processor) -> str:
+    keep = labels != -100
+    kept_ids = input_ids[keep].detach().cpu().tolist()
+    pad_id = processor.tokenizer.pad_token_id
+    if pad_id is not None:
+        kept_ids = [token_id for token_id in kept_ids if token_id != pad_id]
+    return processor.tokenizer.decode(kept_ids, skip_special_tokens=False)
+
+
 
 
 def main() -> None:
@@ -232,10 +273,15 @@ def main() -> None:
         config_name="en",
         cache_dir=cache_dir,
     )
-    samples = _select_samples(dataset, 4)
+    samples = _select_samples_by_modality(dataset, ("both", "text", "image"))
+    modalities = [
+        (sample.get("modality") or "").strip().lower()
+        for sample in samples
+    ]
 
     print(f"dataset_id={dataset_id}")
     print(f"samples_loaded={len(samples)}")
+    print(f"sample_modalities={modalities}")
     print(f"system_prompt={Queries().SYSTEM_PROMPT[:120]}...")
 
     train_collator = Llama32VisionSFTCollator(
@@ -252,45 +298,78 @@ def main() -> None:
     print("\n=== TRAINING ===")
     train_outputs = train_collator(samples)
     _summarize_batch(train_outputs, label_outputs=True)
+    assert "labels" in train_outputs, "Training outputs should include labels."
+    assert "input_ids" in train_outputs, "Training outputs should include input_ids."
+    assert (
+        train_outputs["labels"].shape == train_outputs["input_ids"].shape
+    ), "Labels and input_ids must have matching shapes."
 
-    # 2. Detailed Single Sample Check
-    first = samples[0]
-    
-    # Run the new masking check
-    print("\n--- Masking Verification ---")
-    _print_mask_check(
-        train_outputs["labels"][0],
-        train_outputs["input_ids"][0],
-        processor
-    )
-    label_ids = train_outputs["labels"][0][train_outputs["labels"][0] != -100].tolist()
-    if label_ids:
-        print("\nlabel_tokens_decoded=")
-        print(processor.tokenizer.decode(label_ids, skip_special_tokens=False))
-    else:
-        print("label_tokens_decoded=")
-        print("<none>")
+    for idx, sample in enumerate(samples):
+        modality = train_collator._get_modality(sample)
+        user_text = train_collator._user_text(sample, modality)
+        user_messages = train_collator._user_message(user_text, modality)
+        user_content_types = [item["type"] for item in user_messages[-1]["content"]]
 
-    # 3. Verify specifically the boundary
-    labels = train_outputs["labels"][0]
-    input_ids = train_outputs["input_ids"][0]
-    
-    # Find the transition point (first non -100 index)
-    first_loss_idx = (labels != -100).nonzero(as_tuple=True)[0][0].item()
-    transition_tokens = input_ids[max(0, first_loss_idx-5) : first_loss_idx+5].tolist()
-    transition_text = processor.tokenizer.decode(transition_tokens)
-    
-    print(f"Token transition at index: {first_loss_idx}")
-    print(f"Transition context: '...{transition_text}...'")
+        print(f"\n--- sample[{idx}] modality={modality} ---")
+        print(f"user_content_types={user_content_types}")
+        if modality == "text":
+            assert user_content_types == ["text"], "Text-only sample should omit image content."
+        else:
+            assert "image" in user_content_types, "Image-capable sample should include image content."
 
-    print("\nformatted_prompt_text\n")
-    print(
-        processor.apply_chat_template(
-            train_collator._user_message(train_collator._user_text(first)),
+        prompt_text = processor.apply_chat_template(
+            user_messages,
             tokenize=False,
             add_generation_prompt=True,
         )
-    )    
+        print("\nformatted_prompt_text_train=")
+        print(prompt_text)
+
+        full_text = _format_full_text(train_collator, sample, processor)
+        print("\nformatted_full_text=")
+        print(full_text)
+        target_in_text = (sample.get("target_json") or "") in full_text
+        print("target_json_in_text=" + str(target_in_text))
+        assert target_in_text, "Expected target_json to be included in assistant text."
+
+        print("\n--- Masking Verification ---")
+        _print_mask_check(
+            train_outputs["labels"][idx],
+            train_outputs["input_ids"][idx],
+            processor,
+        )
+
+        print(f"\ndecoded_input_ids_sample{idx}=")
+        print(_decode_ids(train_outputs["input_ids"][idx], processor))
+
+        print(f"\ndecoded_labels_sample{idx}_loss_tokens_only=")
+        print(
+            _decode_labels(
+                train_outputs["labels"][idx],
+                train_outputs["input_ids"][idx],
+                processor,
+            )
+        )
+
+        label_ids = train_outputs["labels"][idx][train_outputs["labels"][idx] != -100].tolist()
+        if label_ids:
+            print("\nlabel_tokens_decoded=")
+            print(processor.tokenizer.decode(label_ids, skip_special_tokens=False))
+        else:
+            print("label_tokens_decoded=")
+            print("<none>")
+
+        labels = train_outputs["labels"][idx]
+        input_ids = train_outputs["input_ids"][idx]
+        non_masked = (labels != -100).nonzero(as_tuple=True)[0]
+        if len(non_masked) > 0:
+            first_loss_idx = non_masked[0].item()
+            transition_tokens = input_ids[max(0, first_loss_idx - 5) : first_loss_idx + 5].tolist()
+            transition_text = processor.tokenizer.decode(transition_tokens, skip_special_tokens=False)
+            print(f"Token transition at index: {first_loss_idx}")
+            print(f"Transition context: '...{transition_text}...'")
+        else:
+            print("Token transition at index: <none>")
 
 
     print("\n=== INFERENCE ===")
@@ -298,16 +377,24 @@ def main() -> None:
     _summarize_batch(infer_outputs, label_outputs=False)
     assert "labels" not in infer_outputs, "Inference outputs should not include labels."
     assert "input_ids" in infer_outputs, "Inference outputs should include input_ids."
-    print("formatted_prompt_text=")
-    print(
-        processor.apply_chat_template(
-            infer_collator._user_message(infer_collator._user_text(first)),
-            tokenize=False,
-            add_generation_prompt=True,
+    for idx, sample in enumerate(samples):
+        modality = infer_collator._get_modality(sample)
+        print(f"formatted_prompt_text_sample{idx}_modality_{modality}=")
+        print(
+            processor.apply_chat_template(
+                infer_collator._user_message(
+                    infer_collator._user_text(sample, modality),
+                    modality,
+                ),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
         )
-    )
-
-    print("assistant_output_expected=" + json.dumps(first["target_json"])[:120] + "...")
+        print(
+            f"assistant_output_expected_sample{idx}="
+            + json.dumps(sample.get("target_json", ""))[:120]
+            + "..."
+        )
 
     # compute_length_stats(dataset, train_collator, processor)
 

@@ -15,8 +15,9 @@ def _format_full_text(
     example: dict,
     processor,
 ) -> str:
-    user_text = collator._user_text(example)
-    messages = collator._user_message(user_text)
+    modality = collator._get_modality(example)
+    user_text = collator._user_text(example, modality)
+    messages = collator._user_message(user_text, modality)
     target = (example.get(collator.target_key) or "").strip()
     full_messages = messages + [
         {"role": "assistant", "content": [{"type": "text", "text": target}]}
@@ -76,6 +77,32 @@ def _select_samples(dataset, max_samples: int) -> list[dict]:
     return list(dataset)[:max_samples]
 
 
+def _select_samples_by_modality(
+    dataset,
+    modalities: tuple[str, ...] = ("both", "text", "image"),
+    max_scan: int = 20000,
+) -> list[dict]:
+    selected = {}
+    scanned = 0
+
+    for row in dataset:
+        scanned += 1
+        modality = (row.get("modality") or "").strip().lower()
+        if modality in modalities and modality not in selected:
+            selected[modality] = row
+        if len(selected) == len(modalities) or scanned >= max_scan:
+            break
+
+    missing = [m for m in modalities if m not in selected]
+    if missing:
+        raise ValueError(
+            f"Could not find all required modalities {modalities}. "
+            f"missing={missing}, scanned={scanned}"
+        )
+
+    return [selected[m] for m in modalities]
+
+
 def _compute_max_lengths(
     collator: Qwen3VisionSFTCollator,
     dataset,
@@ -92,8 +119,9 @@ def _compute_max_lengths(
     tok = _get_tokenizer(processor)
 
     for example in samples:
-        user_text = collator._user_text(example)
-        user_messages = collator._user_message(user_text)
+        modality = collator._get_modality(example)
+        user_text = collator._user_text(example, modality)
+        user_messages = collator._user_message(user_text, modality)
 
         prompt_text = processor.apply_chat_template(
             user_messages,
@@ -196,10 +224,15 @@ def main() -> None:
             config_name="en",
             cache_dir=cache_dir,
         )
-        samples = _select_samples(dataset, 4)
+        samples = _select_samples_by_modality(dataset, ("both", "text", "image"))
+        modalities = [
+            (sample.get("modality") or "").strip().lower()
+            for sample in samples
+        ]
 
         print(f"dataset_id={dataset_id}")
         print(f"samples_loaded={len(samples)}")
+        print(f"sample_modalities={modalities}")
         print(f"system_prompt={Queries().SYSTEM_PROMPT}...")
 
         train_collator = Qwen3VisionSFTCollator(
@@ -209,9 +242,11 @@ def main() -> None:
         )
 
         # Quick schema sanity
-        first = samples[0]
-        assert train_collator.image_key in first, f"Missing {train_collator.image_key} in sample[0]"
-        assert (first.get(train_collator.target_key) or "").strip(), "Missing target_json in sample[0]"
+        for idx, sample in enumerate(samples):
+            modality = train_collator._get_modality(sample)
+            if modality in {"both", "image"}:
+                assert train_collator.image_key in sample, f"Missing {train_collator.image_key} in sample[{idx}]"
+            assert (sample.get(train_collator.target_key) or "").strip(), f"Missing target_json in sample[{idx}]"
 
         print("\n=== TRAINING ===")
         train_outputs = train_collator(samples)
@@ -223,41 +258,55 @@ def main() -> None:
             "Labels and input_ids must have matching shapes."
         )
 
-        full_text = _format_full_text(train_collator, first, processor)
-        print("formatted_full_text=")
-        print(full_text)
+        for idx, sample in enumerate(samples):
+            modality = train_collator._get_modality(sample)
+            user_text = train_collator._user_text(sample, modality)
+            user_messages = train_collator._user_message(user_text, modality)
+            user_content_types = [
+                item["type"] for item in user_messages[-1]["content"]
+            ]
+            print(f"\n--- sample[{idx}] modality={modality} ---")
+            print(f"user_content_types={user_content_types}")
+            if modality == "text":
+                assert user_content_types == ["text"], "Text-only sample should omit image content."
+            else:
+                assert "image" in user_content_types, "Image-capable sample should include image content."
 
-        target_str = (first.get("target_json") or "").strip()
-        target_in_text = target_str in full_text
-        print("target_json_in_text=" + str(target_in_text))
-        assert target_in_text, "Expected target_json to be included in assistant text."
+            full_text = _format_full_text(train_collator, sample, processor)
+            print("formatted_full_text=")
+            print(full_text)
 
-        # Option B: compute prompt_len by finding assistant marker inside input_ids
-        prompt_len = _assistant_prompt_len_from_input_ids(
-            train_outputs["input_ids"][0],
-            processor,
-        )
-        print(f"prompt_len_from_input_ids={prompt_len}")
+            target_str = (sample.get(train_collator.target_key) or "").strip()
+            target_in_text = target_str in full_text
+            print("target_json_in_text=" + str(target_in_text))
+            assert target_in_text, "Expected target_json to be included in assistant text."
 
-        _print_mask_check(
-            train_outputs["labels"][0],
-            train_outputs["input_ids"][0],
-            prompt_len,
-            processor,
-        )
-
-        # --- Decode and print ---
-        print("\ndecoded_input_ids_sample0=")
-        print(_decode_ids(train_outputs["input_ids"][0], processor))
-
-        print("\ndecoded_labels_sample0_loss_tokens_only=")
-        print(
-            _decode_labels(
-                train_outputs["labels"][0],
-                train_outputs["input_ids"][0],
+            # Option B: compute prompt_len by finding assistant marker inside input_ids
+            prompt_len = _assistant_prompt_len_from_input_ids(
+                train_outputs["input_ids"][idx],
                 processor,
             )
-        )
+            print(f"prompt_len_from_input_ids={prompt_len}")
+
+            _print_mask_check(
+                train_outputs["labels"][idx],
+                train_outputs["input_ids"][idx],
+                prompt_len,
+                processor,
+            )
+
+            # --- Decode and print ---
+            print(f"\ndecoded_input_ids_sample{idx}=")
+            print(_decode_ids(train_outputs["input_ids"][idx], processor))
+
+            print(f"\ndecoded_labels_sample{idx}_loss_tokens_only=")
+            print(
+                _decode_labels(
+                    train_outputs["labels"][idx],
+                    train_outputs["input_ids"][idx],
+                    processor,
+                )
+            )
 
         infer_collator = Qwen3VisionSFTCollator(
             processor=processor,
@@ -272,16 +321,21 @@ def main() -> None:
         assert "labels" not in infer_outputs, "Inference outputs should not include labels."
         assert "input_ids" in infer_outputs, "Inference outputs should include input_ids."
 
-        print("formatted_prompt_text=")
-        print(
-            processor.apply_chat_template(
-                infer_collator._user_message(infer_collator._user_text(first)),
-                tokenize=False,
-                add_generation_prompt=True,
+        for idx, sample in enumerate(samples):
+            modality = infer_collator._get_modality(sample)
+            print(f"formatted_prompt_text_sample{idx}_modality_{modality}=")
+            print(
+                processor.apply_chat_template(
+                    infer_collator._user_message(
+                        infer_collator._user_text(sample, modality),
+                        modality,
+                    ),
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
             )
-        )
-
-        print("assistant_output_expected=" + target_str[:120] + "...")
+            target_str = (sample.get(infer_collator.target_key) or "").strip()
+            print(f"assistant_output_expected_sample{idx}=" + target_str)
 
         # max_full, max_prompt = _compute_max_lengths(train_collator, dataset, processor, max_samples=len(dataset))
         # print(f"max_full_length_tokens={max_full}")

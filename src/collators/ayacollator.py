@@ -17,6 +17,7 @@ class AyaVisionSFTCollator:
         training: bool = True,
         max_length: Optional[int] = None,
         image_key: str = "image",
+        modality_key: str = "modality",
         query_key: str = "query",
         caption_key: str = "caption",
         target_key: str = "target_json",
@@ -30,6 +31,7 @@ class AyaVisionSFTCollator:
         self.training = training
         self.max_length = max_length
         self.image_key = image_key
+        self.modality_key = modality_key
         self.query_key = query_key
         self.caption_key = caption_key
         self.target_key = target_key
@@ -104,26 +106,45 @@ class AyaVisionSFTCollator:
         pil_img = pil_img.resize((364, 364))
         return pil_img
 
-    def _user_text(self, example: Dict[str, Any]) -> str:
+    def _get_modality(self, example: Dict[str, Any]) -> str:
+        modality = (example.get(self.modality_key) or "both").strip().lower()
+        if modality not in {"both", "text", "image"}:
+            raise ValueError(f"invalid modality `{modality}`")
+        return modality
+
+    def _user_text(self, example: Dict[str, Any], modality: str = "both") -> str:
         query = (example.get(self.query_key) or "").strip()
+        if modality == "image":
+            return query
         caption = (example.get(self.caption_key) or "").strip()
         if caption:
             return f"{query}\nCAPTION: {caption}".strip()
         return query
 
-    def _messages(self, user_text: str, image: Image.Image) -> List[Dict[str, Any]]:
+    def _messages(
+        self,
+        user_text: str,
+        image: Optional[Image.Image] = None,
+        modality: str = "both",
+    ) -> List[Dict[str, Any]]:
         msgs: List[Dict[str, Any]] = []
         if self.system_prompt:
             msgs.append(
                 {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]}
             )
+        if modality == "text":
+            user_content = [{"type": "text", "text": user_text}]
+        else:
+            if image is None:
+                raise ValueError("image is required for non-text modality")
+            user_content = [
+                {"type": "text", "text": user_text},
+                {"type": "image", "image": image},
+            ]
         msgs.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "image", "image": image},
-                ],
+                "content": user_content,
             }
         )
         return msgs
@@ -148,24 +169,37 @@ class AyaVisionSFTCollator:
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         try:
+            if not batch:
+                raise ValueError("empty batch")
+
+            modalities: List[str] = []
+            images: List[Optional[Image.Image]] = []
             for ex in batch:
-                if self.image_key not in ex:
-                    raise ValueError(f"missing `{self.image_key}` in example")
+                modality = self._get_modality(ex)
+                modalities.append(modality)
+                if modality in {"both", "image"}:
+                    if self.image_key not in ex:
+                        raise ValueError(f"missing `{self.image_key}` in `{modality}` example")
+                    images.append(self._normalize_image(ex[self.image_key]))
+                else:
+                    images.append(None)
                 if self.training:
                     tgt = (ex.get(self.target_key) or "").strip()
                     if not tgt:
                         raise ValueError("missing target_json for training")
 
-            images: List[Image.Image] = [self._normalize_image(ex[self.image_key]) for ex in batch]
-            user_texts: List[str] = [self._user_text(ex) for ex in batch]
+            user_texts: List[str] = [
+                self._user_text(ex, modality)
+                for ex, modality in zip(batch, modalities)
+            ]
 
             full_messages_batch: List[List[Dict[str, Any]]] = []
             prompt_messages_batch: List[List[Dict[str, Any]]] = []
             full_texts: List[str] = []
             prompt_texts: List[str] = []
 
-            for ex, utext, img in zip(batch, user_texts, images):
-                user_msgs = self._messages(utext, img)
+            for ex, modality, utext, img in zip(batch, modalities, user_texts, images):
+                user_msgs = self._messages(utext, image=img, modality=modality)
 
                 if self.training:
                     tgt = (ex.get(self.target_key) or "").strip()

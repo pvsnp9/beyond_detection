@@ -3,6 +3,8 @@ from typing import List, Dict, Any
 
 @dataclass(frozen=True)
 class Queries:
+    SFT_QUERY: str = "Evaluate this image and text pair for any sarcastic intent."
+    
     DETECTION_QUERIES: list[str] = field(
         default_factory=lambda: [
             "Analyze the relationship between the image and caption to detect sarcasm.",
@@ -27,24 +29,27 @@ class Queries:
         "Output: ONLY one valid JSON object (no markdown, no extra text).\n\n"
         "Schema:\n"
         "{\n"
-        '  "label": "sarcastic" | "non_sarcastic",\n'
         '  "need_explanation": true | false,\n'
         '  "visual_facts": [{"id": int, "fact": "str"}],\n'
         '  "evidence_fact_ids": [int],\n'
         '  "text_literal": "str",\n'
         '  "incongruity": "str",\n'
-        '  "explanation": "str"\n'
+        '  "label": "sarcastic" | "non_sarcastic" | "unknown",\n'
+        '  "explanation": "str",\n'
+        '  "missing_modalities": ["image" | "text"]\n'
         "}\n\n"
         "Rules:\n"
         "1) visual_facts: 2-4 directly observable facts; ids are consecutive starting at 0.\n"
         "2) evidence_fact_ids: subset of visual_facts ids used to support the decision.\n"
         "3) text_literal: restate the caption's literal meaning as a plain, non-ironic statement.\n"
-        '4) label="sarcastic" only if the caption\'s intended meaning conflicts with visual facts (irony/mockery/exaggeration); else "non_sarcastic".\n'
-        '5) incongruity: "" if non_sarcastic; otherwise describe the specific mismatch (text_literal vs visual reality).\n'
-        "6) explanation: if sarcastic, justify using evidence_fact_ids; if non_sarcastic, brief alignment statement.\n"
-        '7) If need_explanation=false: visual_facts=[], evidence_fact_ids=[], text_literal="", incongruity="", explanation="".\n'
-        "8) Strict JSON: double quotes, no trailing commas, no extra keys."
+        '4) label: "sarcastic" only if intended meaning conflicts with visual facts; "non_sarcastic" if aligned; "unknown" if a required modality is missing.\n'
+        '5) incongruity: "" if non_sarcastic/unknown; otherwise describe the specific mismatch (text_literal vs visual reality).\n'
+        "6) explanation: if sarcastic, justify using evidence_fact_ids; if non_sarcastic, brief alignment; if unknown, state what is missing.\n"
+        '7) If need_explanation=false: visual_facts=[], evidence_fact_ids=[], text_literal="", incongruity="", explanation="", missing_modalities=[].\n'
+        '8) missing_modalities: [] if both image and caption are present; otherwise include the missing ones (e.g., ["text"] or ["image"]).\n'
+        "9) Strict JSON: double quotes, no trailing commas, no extra keys."
     )
+
 
 
 
