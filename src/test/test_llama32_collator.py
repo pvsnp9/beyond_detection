@@ -243,6 +243,83 @@ def _decode_labels(labels: torch.Tensor, input_ids: torch.Tensor, processor) -> 
     return processor.tokenizer.decode(kept_ids, skip_special_tokens=False)
 
 
+def _assert_cross_attention_alignment(
+    outputs: dict,
+    samples: List[dict],
+    collator: Llama32VisionSFTCollator,
+) -> None:
+    if "cross_attention_mask" not in outputs:
+        print("cross_attention_mask_present=False")
+        return
+
+    cross_attention_mask = outputs["cross_attention_mask"]
+    input_ids = outputs["input_ids"]
+    print(f"cross_attention_mask_shape={tuple(cross_attention_mask.shape)}")
+    print(f"input_ids_shape={tuple(input_ids.shape)}")
+
+    assert cross_attention_mask.ndim >= 2, "cross_attention_mask must have sequence dimension."
+    assert (
+        cross_attention_mask.shape[0] == input_ids.shape[0]
+    ), "cross_attention_mask batch size must match input_ids."
+    assert (
+        cross_attention_mask.shape[1] == input_ids.shape[1]
+    ), "cross_attention_mask seq_len must match input_ids seq_len."
+
+    text_rows = [
+        idx
+        for idx, sample in enumerate(samples)
+        if collator._get_modality(sample) == "text"
+    ]
+    image_rows = [
+        idx
+        for idx, sample in enumerate(samples)
+        if collator._get_modality(sample) in {"both", "image"}
+    ]
+    if text_rows:
+        text_sum = cross_attention_mask[text_rows].sum().item()
+        print(f"cross_attention_mask_text_rows_total={text_sum}")
+        assert (
+            text_sum == 0
+        ), "cross_attention_mask for text-only rows should be zeroed."
+    if image_rows:
+        image_sum = cross_attention_mask[image_rows].sum().item()
+        print(f"cross_attention_mask_image_rows_total={image_sum}")
+        assert (
+            image_sum > 0
+        ), "cross_attention_mask for image rows should contain active attention."
+
+
+def _assert_validation_errors(
+    collator: Llama32VisionSFTCollator,
+    sample_text: dict,
+    sample_image: dict,
+) -> None:
+    try:
+        collator([])
+        raise AssertionError("Expected ValueError for empty batch.")
+    except ValueError as exc:
+        print(f"empty_batch_error={exc}")
+        assert "empty batch" in str(exc)
+
+    missing_image = dict(sample_image)
+    missing_image.pop(collator.image_key, None)
+    try:
+        collator([missing_image])
+        raise AssertionError("Expected ValueError for missing image.")
+    except ValueError as exc:
+        print(f"missing_image_error={exc}")
+        assert "missing" in str(exc) and collator.image_key in str(exc)
+
+    missing_target = dict(sample_text)
+    missing_target[collator.target_key] = ""
+    try:
+        collator([missing_target])
+        raise AssertionError("Expected ValueError for missing target_json in training.")
+    except ValueError as exc:
+        print(f"missing_target_error={exc}")
+        assert "missing target_json for training" in str(exc)
+
+
 
 
 def main() -> None:
@@ -251,6 +328,14 @@ def main() -> None:
     dataset_id = logistics.hf_sft_ds_id
     cache_dir = logistics.hf_cache_dir
     processor = AutoProcessor.from_pretrained(mc.llama3_2vl)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        # Decoder-only generation must use left padding.
+        tokenizer.padding_side = "left"
+
+
     # Processor sanity info
     print("Loaded processor:", mc.llama3_2vl)
     print("Tokenizer padding token:", processor.tokenizer.pad_token, "| pad_id:", processor.tokenizer.pad_token_id)
@@ -303,6 +388,7 @@ def main() -> None:
     assert (
         train_outputs["labels"].shape == train_outputs["input_ids"].shape
     ), "Labels and input_ids must have matching shapes."
+    _assert_cross_attention_alignment(train_outputs, samples, train_collator)
 
     for idx, sample in enumerate(samples):
         modality = train_collator._get_modality(sample)
@@ -371,12 +457,16 @@ def main() -> None:
         else:
             print("Token transition at index: <none>")
 
+    sample_text = next(sample for sample in samples if train_collator._get_modality(sample) == "text")
+    sample_image = next(sample for sample in samples if train_collator._get_modality(sample) in {"both", "image"})
+    _assert_validation_errors(train_collator, sample_text, sample_image)
 
     print("\n=== INFERENCE ===")
     infer_outputs = infer_collator(samples)
     _summarize_batch(infer_outputs, label_outputs=False)
     assert "labels" not in infer_outputs, "Inference outputs should not include labels."
     assert "input_ids" in infer_outputs, "Inference outputs should include input_ids."
+    _assert_cross_attention_alignment(infer_outputs, samples, infer_collator)
     for idx, sample in enumerate(samples):
         modality = infer_collator._get_modality(sample)
         print(f"formatted_prompt_text_sample{idx}_modality_{modality}=")

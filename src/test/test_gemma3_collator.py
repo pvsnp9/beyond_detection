@@ -308,6 +308,13 @@ def main() -> None:
             mc.gemm3_12b,
             trust_remote_code=True,
         )
+
+        if hasattr(processor, "padding_side"):
+            print("processor itself has padding side, set to right")
+            processor.padding_side = "right"
+    
+        if getattr(processor, "tokenizer", None) is not None:
+            processor.tokenizer.padding_side = "right"
         # Processor sanity info
         print("Loaded processor:", mc.gemm3_12b)
         print("Tokenizer padding token:", processor.tokenizer.pad_token, "| pad_id:", processor.tokenizer.pad_token_id)

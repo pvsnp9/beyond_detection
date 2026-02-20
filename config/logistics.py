@@ -163,9 +163,9 @@ class SFTParams:
     fp16: bool = False
 
     # Logging / checkpointing
-    logging_steps: int = 10
-    save_steps: int = 50
-    eval_steps: int = 50
+    logging_steps: int = 2#5
+    save_steps: int = 5#20
+    eval_steps: int = 5#20
     save_total_limit: int = 2
 
     # Model selection
@@ -209,9 +209,9 @@ class DPOParams:
     beta: float = 0.1
     loss_type: str = "sigmoid"
     fp16: bool = False
-    logging_steps: int = 10
-    save_steps: int = 50
-    eval_steps: int = 50
+    logging_steps: int = 5
+    save_steps: int = 20
+    eval_steps: int = 20
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
     metric_for_best_model: str = "eval/reward_margin"

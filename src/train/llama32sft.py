@@ -81,9 +81,12 @@ def main() -> None:
 
     model_name_or_path = cfg["model"]["base_model_name_or_path"]
     processor = AutoProcessor.from_pretrained(model_name_or_path, use_fast=True)
-    if getattr(processor, "tokenizer", None) is not None:
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        # Decoder-only generation must use left padding.
+        tokenizer.padding_side = "left"
 
     qlora_cfg = cfg["qlora"]
     bnb_config = BitsAndBytesConfig(
@@ -114,6 +117,11 @@ def main() -> None:
         model = AutoModelForImageTextToText.from_pretrained(
             model_name_or_path, **model_kwargs
         )
+
+    if tokenizer is not None and tokenizer.pad_token_id is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+        if getattr(model, "generation_config", None) is not None:
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
 
     model.config.use_cache = cfg["sft_extras"].use_cache
 

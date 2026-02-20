@@ -39,7 +39,7 @@ def main() -> None:
     try:
         cfg = build_cfg(ModelCards().gemm3_12b)
         set_seed(cfg["sft"].seed) 
-        cfg["sft"].max_length = 1536
+        cfg["sft"].max_length = 2048
         # these changing since we use A100 80G
         cfg["sft"].batch_size = 8
         cfg["sft"].gradient_accumulation_steps = 8 #64 batch
@@ -87,6 +87,8 @@ def main() -> None:
             trust_remote_code=True,
             use_fast=True,
         )
+        if hasattr(processor, "padding_side"):
+            processor.padding_side = "right"
         if getattr(processor, "tokenizer", None) is not None:
             processor.tokenizer.padding_side = "right"
         if getattr(processor, "tokenizer", None) is not None:
@@ -193,7 +195,7 @@ def main() -> None:
             load_best_model_at_end=sp.load_best_model_at_end,
             metric_for_best_model=sp.metric_for_best_model,
             greater_is_better=sp.greater_is_better,
-            evaluation_strategy=cfg["sft_extras"].evaluation_strategy,
+            eval_strategy=cfg["sft_extras"].evaluation_strategy,
             report_to=["wandb"] if run is not None else [],
             disable_tqdm=cfg["sft_extras"].disable_tqdm,
             dataloader_num_workers=sp.num_workers,

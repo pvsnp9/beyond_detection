@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-
 import torch
-
 from config.queries import Queries
-
 
 class Llama32VisionSFTCollator:
     def __init__(
@@ -48,39 +45,18 @@ class Llama32VisionSFTCollator:
     def _user_message(self, user_text: str, modality: str = "both") -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if self.system_prompt:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": self.system_prompt}],
-                }
-            )
-        if modality == "text":
-            user_content = [{"type": "text", "text": user_text}]
-        else:
-            user_content = [
-                {"type": "image"},
-                {"type": "text", "text": user_text},
-            ]
-        messages.append(
-            {
-                "role": "user",
-                "content": user_content,
-            }
-        )
+            messages.append({
+                "role": "system",
+                "content": [{"type": "text", "text": self.system_prompt}],
+            })
+        
+        user_content = []
+        if modality != "text":
+            user_content.append({"type": "image"})
+        user_content.append({"type": "text", "text": user_text})
+        
+        messages.append({"role": "user", "content": user_content})
         return messages
-
-    def _prompt_length(self, image: Any, prompt_text: str, modality: str = "both") -> int:
-        processor_kwargs: Dict[str, Any] = {
-            "text": prompt_text,
-            "return_tensors": "pt",
-            "padding": False,
-            "truncation": True,
-            "max_length": self.max_length,
-        }
-        if modality in {"both", "image"}:
-            processor_kwargs["images"] = [[image]]
-        prompt_inputs = self.processor(**processor_kwargs)
-        return prompt_inputs["input_ids"].shape[-1]
 
     def _build_labels(self, input_ids: torch.Tensor) -> torch.Tensor:
         labels = input_ids.clone()
@@ -105,14 +81,16 @@ class Llama32VisionSFTCollator:
                 labels[i, :header_index] = -100
             else:
                 labels[i, :] = -100
-
         return labels
 
-    def _collate_group(
-        self,
-        examples: List[Dict[str, Any]],
-        with_images: bool,
-    ) -> Dict[str, torch.Tensor]:
+    def _pad_2d(self, tensor: torch.Tensor, target_len: int, pad_value: int) -> torch.Tensor:
+        if tensor.shape[1] >= target_len:
+            return tensor
+        pad_cols = target_len - tensor.shape[1]
+        pad = torch.full((tensor.shape[0], pad_cols), pad_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat([pad, tensor], dim=1)
+
+    def _collate_group(self, examples: List[Dict[str, Any]], with_images: bool) -> Dict[str, torch.Tensor]:
         full_texts: List[str] = []
         images_per_sample: List[List[Any]] = []
 
@@ -127,29 +105,12 @@ class Llama32VisionSFTCollator:
 
             if self.training:
                 target = (example.get(self.target_key) or "").strip()
-                full_messages = user_messages + [
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": target}],
-                    }
-                ]
-                full_texts.append(
-                    self.processor.apply_chat_template(
-                        full_messages,
-                        tokenize=False,
-                        add_generation_prompt=False,
-                    )
-                )
+                full_messages = user_messages + [{"role": "assistant", "content": [{"type": "text", "text": target}]}]
+                full_texts.append(self.processor.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=False))
             else:
-                full_texts.append(
-                    self.processor.apply_chat_template(
-                        user_messages,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                )
+                full_texts.append(self.processor.apply_chat_template(user_messages, tokenize=False, add_generation_prompt=True))
 
-        processor_kwargs: Dict[str, Any] = {
+        processor_kwargs = {
             "text": full_texts,
             "return_tensors": "pt",
             "padding": True,
@@ -164,18 +125,6 @@ class Llama32VisionSFTCollator:
             model_inputs["labels"] = self._build_labels(model_inputs["input_ids"])
         return model_inputs
 
-    def _pad_2d(self, tensor: torch.Tensor, target_len: int, pad_value: int) -> torch.Tensor:
-        if tensor.shape[1] >= target_len:
-            return tensor
-        pad_cols = target_len - tensor.shape[1]
-        pad = torch.full(
-            (tensor.shape[0], pad_cols),
-            pad_value,
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        return torch.cat([tensor, pad], dim=1)
-
     def _merge_group_outputs(
         self,
         batch_size: int,
@@ -184,73 +133,65 @@ class Llama32VisionSFTCollator:
         img_idxs: List[int],
         img_inputs: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        pad_id = self.processor.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = 0
+        pad_id = self.processor.tokenizer.pad_token_id or 0
+        target_len = max(text_inputs["input_ids"].shape[1], img_inputs["input_ids"].shape[1])
 
-        target_len = max(
-            text_inputs["input_ids"].shape[1],
-            img_inputs["input_ids"].shape[1],
-        )
+        # Align text and image IDs/Attention (Left Padding)
+        t_ids = self._pad_2d(text_inputs["input_ids"], target_len, pad_id)
+        i_ids = self._pad_2d(img_inputs["input_ids"], target_len, pad_id)
+        t_mask = self._pad_2d(text_inputs["attention_mask"], target_len, 0)
+        i_mask = self._pad_2d(img_inputs["attention_mask"], target_len, 0)
 
-        text_input_ids = self._pad_2d(text_inputs["input_ids"], target_len, pad_id)
-        img_input_ids = self._pad_2d(img_inputs["input_ids"], target_len, pad_id)
-        text_attention = self._pad_2d(text_inputs["attention_mask"], target_len, 0)
-        img_attention = self._pad_2d(img_inputs["attention_mask"], target_len, 0)
+        merged_ids = torch.full((batch_size, target_len), pad_id, dtype=i_ids.dtype, device=i_ids.device)
+        merged_mask = torch.zeros((batch_size, target_len), dtype=i_mask.dtype, device=i_mask.device)
 
-        merged_input_ids = torch.full(
-            (batch_size, target_len),
-            pad_id,
-            dtype=img_input_ids.dtype,
-            device=img_input_ids.device,
-        )
-        merged_attention = torch.zeros(
-            (batch_size, target_len),
-            dtype=img_attention.dtype,
-            device=img_attention.device,
-        )
+        for l_idx, b_idx in enumerate(text_idxs):
+            merged_ids[b_idx], merged_mask[b_idx] = t_ids[l_idx], t_mask[l_idx]
+        for l_idx, b_idx in enumerate(img_idxs):
+            merged_ids[b_idx], merged_mask[b_idx] = i_ids[l_idx], i_mask[l_idx]
 
-        for local_idx, batch_idx in enumerate(text_idxs):
-            merged_input_ids[batch_idx] = text_input_ids[local_idx]
-            merged_attention[batch_idx] = text_attention[local_idx]
-        for local_idx, batch_idx in enumerate(img_idxs):
-            merged_input_ids[batch_idx] = img_input_ids[local_idx]
-            merged_attention[batch_idx] = img_attention[local_idx]
-
-        output: Dict[str, torch.Tensor] = {
-            "input_ids": merged_input_ids,
-            "attention_mask": merged_attention,
-        }
+        output = {"input_ids": merged_ids, "attention_mask": merged_mask}
 
         if self.training:
-            text_labels = self._pad_2d(text_inputs["labels"], target_len, -100)
-            img_labels = self._pad_2d(img_inputs["labels"], target_len, -100)
-            merged_labels = torch.full(
-                (batch_size, target_len),
-                -100,
-                dtype=img_labels.dtype,
-                device=img_labels.device,
-            )
-            for local_idx, batch_idx in enumerate(text_idxs):
-                merged_labels[batch_idx] = text_labels[local_idx]
-            for local_idx, batch_idx in enumerate(img_idxs):
-                merged_labels[batch_idx] = img_labels[local_idx]
+            t_labels = self._pad_2d(text_inputs["labels"], target_len, -100)
+            i_labels = self._pad_2d(img_inputs["labels"], target_len, -100)
+            merged_labels = torch.full((batch_size, target_len), -100, dtype=i_labels.dtype, device=i_labels.device)
+            for l_idx, b_idx in enumerate(text_idxs): merged_labels[b_idx] = t_labels[l_idx]
+            for l_idx, b_idx in enumerate(img_idxs): merged_labels[b_idx] = i_labels[l_idx]
             output["labels"] = merged_labels
 
-        # Vision tensors only exist for image rows; text rows are zero-filled.
-        for key in ("pixel_values", "aspect_ratio_ids", "aspect_ratio_mask", "cross_attention_mask"):
-            if key not in img_inputs:
-                continue
-            img_tensor = img_inputs[key]
-            merged_shape = (batch_size,) + tuple(img_tensor.shape[1:])
-            merged_tensor = torch.zeros(
-                merged_shape,
-                dtype=img_tensor.dtype,
-                device=img_tensor.device,
-            )
-            for local_idx, batch_idx in enumerate(img_idxs):
-                merged_tensor[batch_idx] = img_tensor[local_idx]
-            output[key] = merged_tensor
+        # Fix Vision Tensors: align cross_attention_mask sequence axis with target_len
+        vision_keys = ("pixel_values", "aspect_ratio_ids", "aspect_ratio_mask", "cross_attention_mask")
+        for key in vision_keys:
+            if key not in img_inputs: continue
+            
+            ref_tensor = img_inputs[key]
+            # Mllama cross_attention_mask shape is (batch, seq_len, max_num_images, max_num_tiles).
+            # Left-pad on seq_len so text and vision attention stay position-aligned.
+            if key == "cross_attention_mask":
+                if ref_tensor.ndim < 2:
+                    raise ValueError(
+                        f"invalid cross_attention_mask rank={ref_tensor.ndim}, "
+                        f"expected at least 2 dimensions"
+                    )
+                seq_len = ref_tensor.shape[1]
+                padding_len = target_len - seq_len
+                if padding_len > 0:
+                    pad_shape = list(ref_tensor.shape)
+                    pad_shape[1] = padding_len
+                    # 0 in cross_attention_mask means "no attention" for the left padding
+                    padding = torch.zeros(pad_shape, dtype=ref_tensor.dtype, device=ref_tensor.device)
+                    ref_tensor = torch.cat([padding, ref_tensor], dim=1)
+                elif padding_len < 0:
+                    raise ValueError(
+                        f"cross_attention_mask seq_len ({seq_len}) exceeds merged target_len ({target_len})"
+                    )
+
+            merged_shape = (batch_size,) + tuple(ref_tensor.shape[1:])
+            merged_v_tensor = torch.zeros(merged_shape, dtype=ref_tensor.dtype, device=ref_tensor.device)
+            for l_idx, b_idx in enumerate(img_idxs):
+                merged_v_tensor[b_idx] = ref_tensor[l_idx]
+            output[key] = merged_v_tensor
 
         return output
 
@@ -258,33 +199,24 @@ class Llama32VisionSFTCollator:
         if not batch:
             raise ValueError("empty batch")
 
-        text_idxs: List[int] = []
-        img_idxs: List[int] = []
-        for i, example in enumerate(batch):
-            modality = self._get_modality(example)
+        text_idxs, img_idxs = [], []
+        for i, ex in enumerate(batch):
+            modality = self._get_modality(ex)
             if modality in {"both", "image"}:
-                if self.image_key not in example:
+                if self.image_key not in ex:
                     raise ValueError(f"missing `{self.image_key}` in `{modality}` example")
                 img_idxs.append(i)
             else:
                 text_idxs.append(i)
+            if self.training:
+                target = (ex.get(self.target_key) or "").strip()
+                if not target:
+                    raise ValueError("missing target_json for training")
 
-        if not text_idxs:
-            img_examples = [batch[i] for i in img_idxs]
-            return self._collate_group(img_examples, with_images=True)
-        if not img_idxs:
-            text_examples = [batch[i] for i in text_idxs]
-            return self._collate_group(text_examples, with_images=False)
+        if not text_idxs: return self._collate_group([batch[i] for i in img_idxs], True)
+        if not img_idxs: return self._collate_group([batch[i] for i in text_idxs], False)
 
-        # Llama processor cannot mix rows with/without image tokens in one call.
-        text_examples = [batch[i] for i in text_idxs]
-        img_examples = [batch[i] for i in img_idxs]
-        text_inputs = self._collate_group(text_examples, with_images=False)
-        img_inputs = self._collate_group(img_examples, with_images=True)
-        return self._merge_group_outputs(
-            batch_size=len(batch),
-            text_idxs=text_idxs,
-            text_inputs=text_inputs,
-            img_idxs=img_idxs,
-            img_inputs=img_inputs,
-        )
+        text_inputs = self._collate_group([batch[i] for i in text_idxs], False)
+        img_inputs = self._collate_group([batch[i] for i in img_idxs], True)
+        
+        return self._merge_group_outputs(len(batch), text_idxs, text_inputs, img_idxs, img_inputs)
