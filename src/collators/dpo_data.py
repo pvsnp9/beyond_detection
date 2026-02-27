@@ -6,15 +6,15 @@ def format_hf_dpo_data(example: Dict[str, Any], processor:Any)->Dict[str, Any]:
     try:
         if "image" not in example:
             raise KeyError(f"Missing 'image' in example.")
-        if "prompt" not in example:
-            raise KeyError(f"Missing 'prompt (query)' in example.")
+        if "query" not in example and "prompt" not in example:
+            raise KeyError("Missing 'query' in example.")
         if "chosen" not in example or "rejected" not in example:
             raise KeyError(f"Missing 'chosen' or 'rejected' in example.")
         
-        # for eval we need query 
-        query = example.get('prompt', '')
+        # raw HF field is `query`; keep `prompt` fallback for older datasets
+        query = example.get("query", example.get("prompt", ""))
         img = _normalize_image(example.get('image', None))
-        user_text = f"{example.get('prompt', '')}\nCAPTION: {example.get('caption', '')}".strip()
+        user_text = f"{query}\nCAPTION: {example.get('caption', '')}".strip()
         
         
         messages = [

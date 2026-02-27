@@ -21,7 +21,7 @@ class Queries:
         ]
     )
 
-    DPO_QUERY: str = "Does the visual context support or contradict the literal meaning of the caption?"
+    DPO_QUERY: str = "Assess sarcasm using the available modalities by comparing caption meaning with visual evidence when present. If image or caption is missing, return unknown and explain what is missing."
 
     SYSTEM_PROMPT: str = (
         "Role: Expert Multimodal Sarcasm Analyst.\n"
@@ -70,47 +70,67 @@ NON_SARC_EXPLANATION_TEMPLATES = [
 
 
 REJECTED_SYSTEM_PROMPT = """You are generating REJECTED (non-preferred) responses for multimodal DPO (mDPO).
-You DO NOT have access to the image. You must rely ONLY on the provided CAPTION and VISUAL_FACTS.
-Your job is to create a strong, plausible decoy that is well-formed and similar length to CHOSEN, but WRONG due to exactly ONE controlled mistake.
+You DO NOT have access to the image. You must rely ONLY on the provided CAPTION, MODALITY, CHOSEN_JSON, and VISUAL_FACTS.
+Your job is to create a strong, plausible decoy JSON that is well-formed and similar quality to CHOSEN_JSON, but WRONG due to exactly ONE controlled mistake.
 
 OUTPUT FORMAT RULES (strict):
 - Output MUST be a single valid JSON object (no markdown, no extra text).
-- Use keys: id, rejected, meta
-- The "rejected" value MUST be a single string in the same sectioned format as CHOSEN:
-  [VISUAL_FACTS] ... [TEXT_LITERAL] ... [INCONGRUITY] ... [EXPLANATION]
-- The rejected MUST:
-  (a) include the provided visual facts (do not write “not used”),
-  (b) include a coherent TEXT_LITERAL derived from CAPTION,
-  (c) include an INCONGRUITY and EXPLANATION that look reasonable,
-  (d) be wrong due to exactly ONE error_type from the allowed set.
+- Top-level keys: id, rejected, meta
+- "rejected" MUST be a JSON object with the same target schema fields as CHOSEN_JSON:
+  need_explanation, visual_facts, evidence_fact_ids, text_literal, incongruity, label, explanation, missing_modalities
+- Keep modality behavior consistent with the provided MODALITY:
+  - both: missing_modalities must be []
+  - image: missing_modalities must include "text"
+  - text: missing_modalities must include "image"
+- Use exactly ONE error_type from ALLOWED_ERROR_TYPES_FOR_THIS_RECORD.
 
-ALLOWED ERROR TYPES (choose exactly one):
-1) hallucinated_visual_detail  -> mention ONE concrete visual detail that is NOT in VISUAL_FACTS (only one hallucination).
-2) wrong_incongruity_pivot     -> use only given facts, but identify the wrong contradiction (plausible but incorrect pivot).
-3) evidence_mismatch           -> INCONGRUITY/EXPLANATION claim is plausible, but it is not supported by the provided VISUAL_FACTS (without adding new visual details).
-4) overgeneralized_world_claim -> makes the explanation hinge on an unjustified external claim about the named entity/event (without adding new visual details).
+ERROR TYPE DEFINITIONS:
+- hallucinated_visual_detail: add one concrete visual fact/detail not supported by VISUAL_FACTS.
+- omitted_key_visual_evidence: omit a key visual fact/evidence reference needed for the chosen judgment.
+- wrong_incongruity_pivot: pick the wrong contradiction pivot while still sounding plausible (cross-modal only).
+- evidence_mismatch: make a claim in incongruity/explanation that is not supported by provided VISUAL_FACTS (without adding a new concrete visual detail).
+- label_mismatch: set the wrong label while keeping the rest mostly plausible.
+- unsupported_world_knowledge: rely on an unjustified external claim about an entity/event not grounded in inputs.
 
 CONSTRAINTS:
-- Keep length within ±15% of CHOSEN (approximate).
-- Do NOT change the meaning of CAPTION in TEXT_LITERAL.
-- Do NOT mention hashtags, “tone/common usage,” “without visual context,” or that you lack the image.
-- The rejected should be fluent and convincing; it must not be obviously worse or shorter.
-- Safety: do not add protected-attribute inferences, slurs, or calls for violence.
+- Keep the rejected JSON fluent and convincing; it should not be obviously weaker than CHOSEN_JSON.
+- Do NOT add extra keys.
+- Do NOT mention that you lack the image.
+- Do NOT use generic filler phrases (e.g., “tone/common usage”).
+- Safety: no slurs, protected-attribute inferences, or violence advocacy.
 
-QUALITY METADATA (required):
-In meta include:
-- error_type: one of the allowed types
-- hallucination_span: the exact phrase that is the mistake (or empty string if not hallucinated_visual_detail)
-- confidence: low/medium/high (how confident you are this rejected is wrong for exactly one reason)
-- notes: 1 short sentence explaining why it’s wrong
+QUALITY METADATA (required in meta):
+- error_type: one allowed error type
+- error_field: the primary field containing the mistake (e.g., label, explanation, incongruity, visual_facts[3].fact)
+- hallucination_span: exact hallucinated phrase if error_type=hallucinated_visual_detail, else ""
+- confidence: low|medium|high
+- notes: one short sentence explaining why the rejected output is wrong
 """
 
 ALLOWED_ERROR_TYPES = [
     "hallucinated_visual_detail",
+    "omitted_key_visual_evidence",
     "wrong_incongruity_pivot",
     "evidence_mismatch",
-    "overgeneralized_world_claim",
+    "label_mismatch",
+    "unsupported_world_knowledge",
 ]
+
+
+def get_allowed_error_types_for_modality(modality: str) -> List[str]:
+    m = str(modality or "").strip().lower()
+    if m == "text":
+        return ["label_mismatch"]
+    if m == "image":
+        return [
+            "hallucinated_visual_detail",
+            "omitted_key_visual_evidence",
+            "evidence_mismatch",
+            "label_mismatch",
+            "unsupported_world_knowledge",
+        ]
+    # default "both"
+    return list(ALLOWED_ERROR_TYPES)
 
 # JSON Schema for Structured Outputs (Responses API text.format json_schema)
 REJECT_SCHEMA: Dict[str, Any] = {
@@ -122,16 +142,60 @@ REJECT_SCHEMA: Dict[str, Any] = {
         "required": ["id", "rejected", "meta"],
         "properties": {
             "id": {"type": "string"},
-            "rejected": {"type": "string"},
+            "rejected": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "need_explanation",
+                    "visual_facts",
+                    "evidence_fact_ids",
+                    "text_literal",
+                    "incongruity",
+                    "label",
+                    "explanation",
+                    "missing_modalities",
+                ],
+                "properties": {
+                    "need_explanation": {"type": "boolean"},
+                    "visual_facts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "fact"],
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "fact": {"type": "string"},
+                            },
+                        },
+                    },
+                    "evidence_fact_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "text_literal": {"type": "string"},
+                    "incongruity": {"type": "string"},
+                    "label": {
+                        "type": "string",
+                        "enum": ["sarcastic", "non_sarcastic", "unknown"],
+                    },
+                    "explanation": {"type": "string"},
+                    "missing_modalities": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["image", "text"]},
+                    },
+                },
+            },
             "meta": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["error_type", "hallucination_span", "confidence", "notes"],
+                "required": ["error_type", "error_field", "hallucination_span", "confidence", "notes"],
                 "properties": {
                     "error_type": {
                         "type": "string",
                         "enum": ALLOWED_ERROR_TYPES,
                     },
+                    "error_field": {"type": "string"},
                     "hallucination_span": {"type": "string"},
                     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                     "notes": {"type": "string"},

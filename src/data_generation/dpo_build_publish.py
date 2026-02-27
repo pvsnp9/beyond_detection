@@ -2,6 +2,7 @@
 import os 
 import random
 import re
+from collections import Counter
 from config.logistics import Logistics, REPLACEMENT_WORDS
 from typing import Dict, List, Any
 from src.cot.build_target import (
@@ -15,6 +16,139 @@ from src.data_generation.dpo_creation import PLAIN_TAG_TOKENS, WORD_RE
 from src.utils import read_jsonl
 from config.queries import Queries
 import json
+
+SEVERE_EXCLUDE_FLAGS = {
+    "ambiguous_sarcasm",
+    "caption_not_sarcastic_or_unclear",
+    "multiple_possible_incongruities",
+}
+
+TIER_B_FLAGS = {
+    "possible_ocr_text_in_image",
+    "requires_world_knowledge",
+    "possible_identity_inference_risk",
+    "low_image_clarity",
+}
+
+NON_EFFECTIVE_FLAGS = {"NONE", ""}
+
+
+def _normalize_quality_flags_top_level(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_flags = value
+    elif isinstance(value, str):
+        raw_flags = [value]
+    else:
+        raw_flags = []
+
+    out: List[str] = []
+    seen = set()
+    for item in raw_flags:
+        if not isinstance(item, str):
+            continue
+        flag = item.strip()
+        if not flag or flag in NON_EFFECTIVE_FLAGS or flag in seen:
+            continue
+        seen.add(flag)
+        out.append(flag)
+    return out
+
+
+def _assign_tier_from_flags(flags: List[str]) -> str | None:
+    flag_set = set(flags)
+    if flag_set & SEVERE_EXCLUDE_FLAGS:
+        return None
+    if flag_set & TIER_B_FLAGS:
+        return "B"
+    if not flag_set:
+        return "A"
+    return None
+
+
+def filter_sft_data(
+    logistics: Logistics,
+    lang: str = "en",
+    split: str = "train",
+    weight_a: float = 1.0,
+    weight_b: float = 0.5,
+) -> Dict[str, Any]:
+    src_path = os.path.join(
+        logistics.project_root_dir, logistics.processed_data_dir, "sft", lang, f"{split}.jsonl"
+    )
+    dst_dir = os.path.join(
+        logistics.project_root_dir, logistics.processed_data_dir, "dpo", lang
+    )
+    dst_path = os.path.join(dst_dir, f"{split}.jsonl")
+
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(f"Missing SFT source file: {src_path}")
+
+    os.makedirs(dst_dir, exist_ok=True)
+
+    totals = Counter()
+    tier_counts = Counter()
+    drop_flag_counts = Counter()
+    kept_label_counts = Counter()
+    kept_source_counts = Counter()
+    parse_errors = 0
+
+    with open(src_path, "r", encoding="utf-8") as src, open(dst_path, "w", encoding="utf-8") as dst:
+        for line in src:
+            line = line.strip()
+            if not line:
+                continue
+            totals["read"] += 1
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                parse_errors += 1
+                totals["dropped"] += 1
+                totals["dropped_invalid_json"] += 1
+                continue
+
+            flags = _normalize_quality_flags_top_level(row.get("quality_flags", []))
+            tier = _assign_tier_from_flags(flags)
+            if tier is None:
+                totals["dropped"] += 1
+                totals["dropped_not_tier_ab"] += 1
+                for flag in flags:
+                    drop_flag_counts[flag] += 1
+                if not flags:
+                    drop_flag_counts["UNCLASSIFIED_NO_FLAGS"] += 1
+                continue
+
+            out_row = dict(row)
+            out_row["quality_flags"] = flags
+            out_row["tier"] = tier
+            out_row["weight"] = float(weight_a if tier == "A" else weight_b)
+            dst.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+
+            totals["written"] += 1
+            tier_counts[tier] += 1
+            kept_label_counts[str(out_row.get("label_gt", out_row.get("label", "unknown")))] += 1
+            kept_source_counts[str(out_row.get("source", ""))] += 1
+
+    summary = {
+        "source_path": src_path,
+        "destination_path": dst_path,
+        "lang": lang,
+        "split": split,
+        "weights": {"A": float(weight_a), "B": float(weight_b)},
+        "read": int(totals["read"]),
+        "written": int(totals["written"]),
+        "dropped": int(totals["dropped"]),
+        "parse_errors": int(parse_errors),
+        "tier_counts": dict(sorted(tier_counts.items())),
+        "kept_label_counts": dict(sorted(kept_label_counts.items())),
+        "kept_source_counts": dict(sorted(kept_source_counts.items())),
+        "dropped_flag_counts": dict(sorted(drop_flag_counts.items())),
+    }
+
+    print(
+        f"[filter_sft_data] {lang}/{split} read={summary['read']} written={summary['written']} "
+        f"dropped={summary['dropped']} parse_errors={summary['parse_errors']} tiers={summary['tier_counts']}"
+    )
+    return summary
 
 def replace_tags_cues(text:str)->str:
     try: 
@@ -82,7 +216,7 @@ def parse_chosen_rejected(text:str)->Dict[str, Any]:
         raise e 
 
 
-
+# this is old build target code 
 def build_target(text: str, label_str: str) -> Dict[str, Any]:
     parsed = parse_chosen_rejected(text)
     visual_objs = make_visual_fact_objects(parsed.get("visual_facts", []))
@@ -205,10 +339,10 @@ def create_hf_formatted_dpo_dataset(lang: str, logistics: Logistics, out_dir:str
 
                     example = {
                         "id": record.get("id"),
-                        "image": record.get("local_image_path"),
+                        "image": record.get("image") or record.get("local_image_path"),
                         "caption": record.get("caption"),
                         "modality": str(record.get("modality", "both")).strip().lower() if record.get("modality") else "both",
-                        "prompt": Queries().DPO_QUERY,
+                        "query": Queries().DPO_QUERY,
                         "chosen": json.dumps(chosen, ensure_ascii=False),
                         "rejected": json.dumps(rejected, ensure_ascii=False),
                         "label_gt": label_to_str(record.get("label")),
@@ -216,7 +350,14 @@ def create_hf_formatted_dpo_dataset(lang: str, logistics: Logistics, out_dir:str
                         "source": record.get("source"),
                         "quality_flags": record.get("quality_flags", []),
                         "visual_facts": record.get("visual_facts", []),
-                        "rejected_meta": record.get("rejected_meta", {}),
+                        "tier": str(record.get("tier", "") or ""),
+                        "rejected_meta": {
+                            "error_type": (record.get("rejected_meta", {}) or {}).get("error_type", ""),
+                            "error_field": (record.get("rejected_meta", {}) or {}).get("error_field", ""),
+                            "confidence": (record.get("rejected_meta", {}) or {}).get("confidence", ""),
+                            "notes": (record.get("rejected_meta", {}) or {}).get("notes", ""),
+                            "hallucination_span": (record.get("rejected_meta", {}) or {}).get("hallucination_span", ""),
+                        },
                     }
                     
                     f.write(json.dumps(example, ensure_ascii=False) + "\n")
@@ -231,41 +372,73 @@ def create_hf_formatted_dpo_dataset(lang: str, logistics: Logistics, out_dir:str
         raise e
 
 
-def publish_dpo_hf_data(logistics: Logistics, data_dir: str = "dpo_final") -> None:
+def publish_dpo_hf_data(
+    logistics: Logistics,
+    data_dir: str = "dpo",
+    train_only: bool = False,
+    purge_remote_non_train: bool = False,
+) -> None:
     try:
-        lang = ["en"]
+        if purge_remote_non_train and not train_only:
+            raise ValueError("purge_remote_non_train=True requires train_only=True.")
+
+        langs = ["en"]
         features = get_hf_dpo_features()
-        for lang in lang:
+
+        for lang in langs:
             input_dir = os.path.join(
                 logistics.project_root_dir, logistics.processed_data_dir, data_dir, lang
             )
             datasets_by_split: dict[str, Dataset] = {}
             for split in logistics.splits:
+                if train_only and split != "train":
+                    print(f"[{lang}] [{split}] skipped (train_only=True)")
+                    continue
+
                 split_path = os.path.join(input_dir, f"{split}.jsonl")
                 if not os.path.exists(split_path):
                     print(f"Missing split file: {split_path}")
-                    datasets_by_split[split] = Dataset.from_dict(
-                        {k: [] for k in features.keys()}, features=features
-                    )
-                    print(f"[{lang}] [{split}] size: 0")
                     continue
 
                 rows = read_jsonl(split_path)
-                if rows:
-                    data_dict = {}
-                    for key in features.keys():
-                        if key in ("quality_flags", "visual_facts"):
-                            data_dict[key] = [
-                                row.get(key, []) if isinstance(row.get(key, []), list) else []
-                                for row in rows
-                            ]
-                        else:
-                            data_dict[key] = [row.get(key) for row in rows]
-                else:
-                    data_dict = {k: [] for k in features.keys()}
+                if not rows:
+                    print(f"[{lang}] [{split}] skipped (0 rows)")
+                    continue
+
+                data_dict = {}
+                for key in features.keys():
+                    if key in ("quality_flags", "visual_facts"):
+                        data_dict[key] = [
+                            row.get(key, []) if isinstance(row.get(key, []), list) else []
+                            for row in rows
+                        ]
+                    elif key == "rejected_meta":
+                        data_dict[key] = [
+                            {
+                                "error_type": (row.get("rejected_meta", {}) or {}).get("error_type", ""),
+                                "error_field": (row.get("rejected_meta", {}) or {}).get("error_field", ""),
+                                "confidence": (row.get("rejected_meta", {}) or {}).get("confidence", ""),
+                                "notes": (row.get("rejected_meta", {}) or {}).get("notes", ""),
+                                "hallucination_span": (row.get("rejected_meta", {}) or {}).get("hallucination_span", ""),
+                            }
+                            for row in rows
+                        ]
+                    elif key == "image":
+                        data_dict[key] = [
+                            row.get("image") or row.get("local_image_path") or ""
+                            for row in rows
+                        ]
+                    else:
+                        data_dict[key] = [str(row.get(key, "") or "") for row in rows]
 
                 datasets_by_split[split] = Dataset.from_dict(data_dict, features=features)
                 print(f"[{lang}] [{split}] size: {len(rows)}")
+
+            if not datasets_by_split:
+                raise ValueError(
+                    f"No non-empty splits to publish from {input_dir}. "
+                    "Check data files and train_only setting."
+                )
 
             dataset_dict = DatasetDict(datasets_by_split)
             resolved = resolve_tokens_and_env(logistics_cfg=logistics)
@@ -275,14 +448,65 @@ def publish_dpo_hf_data(logistics: Logistics, data_dir: str = "dpo_final") -> No
                 token=resolved["hf_token"],
             )
             print(f"Published DPO dataset for {lang} to {logistics.hf_dpo_ds_id}")
+            if purge_remote_non_train:
+                _purge_remote_non_train_splits(
+                    repo_id=logistics.hf_dpo_ds_id,
+                    token=resolved["hf_token"],
+                    config_name=lang,
+                )
     except Exception as e:
+        import traceback
         print(f"exception while pushing to HF [id]: {logistics.hf_dpo_ds_id}: {e}")
+        traceback.print_exc()
 
+
+def _purge_remote_non_train_splits(
+    repo_id: str,
+    token: str,
+    config_name: str,
+) -> None:
+    from huggingface_hub import CommitOperationDelete, HfApi
+
+    split_pattern = re.compile(r"(?:^|/)(validation|test)(?:[-/.]|$)")
+
+    def _matches_config_scope(path: str) -> bool:
+        # Files may live either under "<config_name>/..." or at repo root.
+        p = path.strip("/")
+        if p.startswith(f"{config_name}/") or f"/{config_name}/" in p:
+            return True
+        return "/" not in p
+
+    api = HfApi(token=token)
+    repo_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    to_delete: list[str] = []
+    for file_path in repo_files:
+        p = str(file_path).strip("/")
+        if not _matches_config_scope(p):
+            continue
+        if split_pattern.search(p.lower()):
+            to_delete.append(p)
+
+    if not to_delete:
+        print(f"[purge_remote_non_train] no validation/test files found in {repo_id} ({config_name})")
+        return
+
+    operations = [CommitOperationDelete(path_in_repo=p) for p in sorted(set(to_delete))]
+    api.create_commit(
+        repo_id=repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=f"Remove validation/test split files for config {config_name}",
+    )
+    print(f"[purge_remote_non_train] deleted {len(operations)} files from {repo_id} ({config_name})")
+
+
+# use only to publis HF DPO data
 def main():
     logistics = Logistics()
     # for lang in logistics.langs:
-    create_hf_formatted_dpo_dataset(lang="en", logistics=logistics)
-    publish_dpo_hf_data(logistics=logistics)
+    # create_hf_formatted_dpo_dataset(lang="en", logistics=logistics)
+    publish_dpo_hf_data(logistics=logistics, train_only=True, purge_remote_non_train=True)
+    # filter_sft_data(logistics=logistics)
     
 
 # if __name__ == "__main__":
