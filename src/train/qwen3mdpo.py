@@ -5,13 +5,14 @@ import os
 from datetime import datetime
 
 import torch
+from datasets import disable_caching
 from transformers import BitsAndBytesConfig, set_seed, AutoProcessor
 from transformers.trainer_utils import get_last_checkpoint
-from trl import DPOTrainer
 
 from config.logistics import ModelCards, build_dpo_cfg
-from src.collators.dpo_inference_collator import qwen_dpo_inference_collator
+from src.collators.qwen3_collator import Qwen3VisionSFTCollator
 from src.datasets.loader import load_dpo_train_eval_dataset
+from src.train.qwen3_dpo_trainer import Qwen3DataCollatorForPreference, Qwen3DPOTrainer
 from src.utils.env import resolve_tokens_and_env, set_runtime_env
 from src.utils.logging import init_wandb, log_run_metadata
 from src.utils.mdpo_utils import (
@@ -25,6 +26,8 @@ from src.utils.mdpo_utils import (
 )
 def main() -> None:
     cfg = build_dpo_cfg(ModelCards().qwen3_vl_8b_instruct)
+    # Avoid reusing stale tokenization/map artifacts across runs.
+    disable_caching()
 
     set_seed(cfg["dpo"].seed)
 
@@ -84,7 +87,13 @@ def main() -> None:
             processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.padding_side = "right"
 
-
+    
+    # inference collator
+    inf_collator = Qwen3VisionSFTCollator(
+        processor=processor,
+        training=False,
+        max_length=cfg['dpo'].max_length,
+    )
 
     # get the DPO dataset 
     ds = load_dpo_train_eval_dataset(
@@ -92,6 +101,7 @@ def main() -> None:
         processor=processor,
         streaming=cfg["dataset"]["streaming"],
         cache_dir=cfg["logistics"].hf_cache_dir,
+        format_data=True,
     )
     train_dataset = ds.get('train', None)
     eval_dataset = ds.get("eval", None)
@@ -104,23 +114,21 @@ def main() -> None:
 
     model.config.use_cache = cfg["dpo_extras"].use_cache
 
-    def prompt_collator(batch):
-        return qwen_dpo_inference_collator(
-            batch,
-            mode="both",
-            processor=processor,
-            max_length=cfg["dpo"].max_length,
-        )
     
     dpo_args = build_dpo_config(cfg, adapter_output_dir, run_name)
+    # For multimodal prompts, left-truncation can drop image placeholders while
+    # keeping image features, causing token/feature mismatch in Qwen3-VL.
+    dpo_args.truncation_mode = "keep_start"
+    data_collator = Qwen3DataCollatorForPreference(pad_token_id=processor.tokenizer.pad_token_id)
 
-    trainer = DPOTrainer(
+    trainer = Qwen3DPOTrainer(
         model=model,
         ref_model=None,
         args=dpo_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=processor,
+        data_collator=data_collator,
     )
     trainer.add_callback(MDPOTrainMetricsCallback(run))
     trainer.add_callback(
@@ -128,7 +136,7 @@ def main() -> None:
             model,
             processor,
             eval_dataset,
-            prompt_collator,
+            inf_collator,
             cfg,
         )
     )
@@ -155,12 +163,9 @@ def main() -> None:
     with open(os.path.join(adapter_output_dir, "training_meta.json"), "w") as f:
         json.dump(training_meta, f, indent=2)
 
-    log_run_metadata(
-        cfg["logistics"],
-        run_name,
-        adapter_output_dir,
-        extra_metadata=training_meta,
-    )
+    log_run_metadata(run, training_meta)
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":

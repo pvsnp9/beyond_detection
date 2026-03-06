@@ -4,6 +4,11 @@ from PIL import Image
 
 from config.queries import Queries
 
+"""
+Note: Deprectated methods, use Primary collator such as Qwen3VisionSFTCollator(training=False) 
+for inference.
+"""
+
 
 def aya_dpo_inference_collator(
     batch_data,

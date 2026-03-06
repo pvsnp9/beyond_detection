@@ -39,6 +39,7 @@ def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
         run_name=run_name,
         num_train_epochs=dpo_cfg.num_epochs,
         per_device_train_batch_size=dpo_cfg.batch_size,
+        per_device_eval_batch_size=dpo_cfg.eval_batch_size,
         gradient_accumulation_steps=dpo_cfg.gradient_accumulation_steps,
         gradient_checkpointing=extras.gradient_checkpointing,
         learning_rate=dpo_cfg.learning_rate,
@@ -47,6 +48,8 @@ def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
         lr_scheduler_type="cosine",
         max_grad_norm=dpo_cfg.max_grad_norm,
         max_length=dpo_cfg.max_length,
+        max_prompt_length=dpo_cfg.max_prompt_length,
+        max_completion_length=dpo_cfg.max_completion_length,
         beta=dpo_cfg.beta,
         loss_type=dpo_cfg.loss_type,
         bf16=extras.bf16,
@@ -423,8 +426,9 @@ class MDPOMetricsCallback(TrainerCallback):
         self.cfg = cfg
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        model = kwargs.get("model", self.model)
         extra = evaluate_mdpo(
-            self.model,
+            model,
             self.processor,
             self.eval_dataset,
             self.prompt_collator,
@@ -475,8 +479,9 @@ class MDPOStepEvalCallback(TrainerCallback):
             return control
         if state.global_step % self.step_interval != 0:
             return control
+        model = kwargs.get("model", self.model)
         metrics = evaluate_mdpo(
-            self.model,
+            model,
             self.processor,
             self.eval_dataset,
             self.prompt_collator,

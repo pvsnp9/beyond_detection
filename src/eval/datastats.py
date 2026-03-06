@@ -196,7 +196,7 @@ def create_chart(json_path, output_path):
     g.fig.suptitle(
         "Distribution of Quality Flags by Sarcasm Label and Split", fontsize=16
     )
-    g.fig.savefig(output_path, dpi=600, bbox_inches="tight")
+    g.fig.savefig(output_path, dpi=900, bbox_inches="tight")
     plt.close(g.fig)
 
 
@@ -204,11 +204,5 @@ def create_chart(json_path, output_path):
 
 
 
-# if __name__ == "__main__":
-#     # main()
-#     plots_dir = os.path.join(Logistics().project_root_dir, Logistics().reports_dir, "plots")
-#     os.makedirs(plots_dir, exist_ok=True)
-#     create_chart(
-#         json_path=os.path.join(plots_dir,"quality_stats.json"),
-#         output_path=os.path.join(plots_dir,"quality_stats.png")
-#     )
+if __name__ == "__main__":
+    main()

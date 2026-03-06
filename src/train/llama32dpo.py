@@ -91,6 +91,7 @@ def main() -> None:
         processor=processor,
         streaming=cfg["dataset"]["streaming"],
         cache_dir=cfg["logistics"].hf_cache_dir,
+        format_data=True,
     )
     train_dataset = ds.get("train", None)
     eval_dataset = ds.get("eval", None)

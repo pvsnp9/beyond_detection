@@ -17,11 +17,12 @@ def format_hf_dpo_data(example: Dict[str, Any], processor:Any)->Dict[str, Any]:
         user_text = f"{query}\nCAPTION: {example.get('caption', '')}".strip()
         
         
+        user_content = [{"type": "image"}, {"type": "text", "text": user_text}]
+
         messages = [
             {"role": "system", "content": [{"type": "text", "text": Queries().SYSTEM_PROMPT.strip()}]},
-            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": user_text}]},
+            {"role": "user", "content": user_content},
         ]
-        
 
         prompt = processor.apply_chat_template(
             messages, 
@@ -31,7 +32,7 @@ def format_hf_dpo_data(example: Dict[str, Any], processor:Any)->Dict[str, Any]:
         return {
             "query": str(query),
             "images": [img],
-            "prompt": prompt
+            "prompt": prompt,
         }
         
     except Exception as e:

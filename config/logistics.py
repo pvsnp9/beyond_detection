@@ -199,22 +199,24 @@ class DPOParams:
     num_epochs: int = 2
     num_workers: int = 6
     batch_size: int = 2
-    eval_batch_size: int = 2
+    eval_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 1e-6
+    learning_rate: float = 5e-6
     weight_decay: float = 0.01
-    warmup_ratio: float = 0.1
+    warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
-    max_length: int = 2048
+    max_length: int = 4096
+    max_prompt_length: int = 3072
+    max_completion_length: int = 512
     beta: float = 0.1
     loss_type: str = "sigmoid"
     fp16: bool = False
     logging_steps: int = 5
-    save_steps: int = 20
-    eval_steps: int = 20
-    save_total_limit: int = 3
+    save_steps: int = 100
+    eval_steps: int = 100
+    save_total_limit: int = 2
     load_best_model_at_end: bool = True
-    metric_for_best_model: str = "eval/reward_margin"
+    metric_for_best_model: str = "eval_rewards/margins"
     greater_is_better: bool = True
     remove_unused_columns: bool = False
 
@@ -350,7 +352,7 @@ def build_dpo_cfg(model_name_or_path: str) -> dict:
             "fallback_eval_split": "test",
             "streaming": False,
             "max_train_samples": None,
-            "max_eval_samples": 8,
+            "max_eval_samples": 64,
         },
         "output": {
             "adapter_output_dir": None,

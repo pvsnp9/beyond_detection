@@ -7,6 +7,11 @@ import wandb
 
 
 def init_wandb(cfg: Dict[str, Any], run_name: str) -> Optional[wandb.sdk.wandb_run.Run]:
+    if not bool(cfg.get("enabled", True)):
+        os.environ["WANDB_DISABLED"] = "true"
+        print("W&B disabled by config.")
+        return None
+
     if wandb.run is not None:
         return wandb.run
 
