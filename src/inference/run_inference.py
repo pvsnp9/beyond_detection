@@ -9,7 +9,6 @@ from transformers import (
     AutoModelForImageTextToText           # Generic Fallback
 )
 import os
-from pathlib import Path
 from peft import PeftModel
 from config.logistics import Logistics
 from src.collators.inference_collator import (aya_inference_collator,
@@ -17,10 +16,27 @@ from src.collators.inference_collator import (aya_inference_collator,
                                             gemma_inference_collator,
                                             llama_inference_collator )
 from src.datasets.loader import load_hf_dataset
-from src.hf.publish_lora_models import get_sft_best_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from src.utils.sft_utils import get_sft_result_dir
+
+
+VALID_MODALITIES = {"both", "text", "image"}
+VALID_MODEL_TYPES = {"sft", "mdpo"}
+MDPO_MODEL_KEYS = {"llama", "qwen"}
+
+MODEL_DIR_CANDIDATES = {
+    "sft": {
+        "aya": ["aya_vision_8b"],
+        "llama": ["llama32"],
+        "gemma": ["gemma3"],
+        "qwen": ["qwen3_vl_8b", "qwen3"],
+    },
+    "mdpo": {
+        "llama": ["llama32"],
+        "qwen": ["qwen3", "qwen3_vl_8b"],
+    },
+}
 
 
 class BaseModels:
@@ -47,7 +63,7 @@ class BaseModels:
         return mapping.get(model_key, AutoModelForImageTextToText)
 
 
-def get_test_data(config_name: str = "en", task:str = "all"):
+def get_test_data(config_name: str = "en"):
     dataset_id = None
     try:
         dataset_id = Logistics().hf_sft_ds_id
@@ -57,59 +73,186 @@ def get_test_data(config_name: str = "en", task:str = "all"):
             config_name=config_name,
             # download_mode="force_redownload",
         )
-        if task.lower() == "detection": 
-            ds_detect = ds.filter(lambda x: x["task"] == "detection")
-            return ds_detect
-        elif task.lower() == "explanation":
-            ds_exp = ds.filter(lambda x: x["task"] == "explanation")
-            return ds_exp
-        elif task.lower() == "detection_explanation":
-            ds_dex = ds.filter(lambda x: x["task"] == "detection_explanation")
-            return ds_dex
-        else: return ds
+        return ds
     except Exception as e:
         ds_name = dataset_id or "<unknown>"
         raise Exception(f"failed to load the test dataset {ds_name}: {e}")
 
 
-def generate_batch(model, model_inputs, processor, task: str = None, max_tokens=256):
+def _resolve_model_dir(model_key: str, model_type: str) -> str:
+    logistics = Logistics()
+    root_dir = os.path.join(
+        logistics.project_root_dir,
+        logistics.models_output_dir,
+        model_type,
+    )
+    candidates = MODEL_DIR_CANDIDATES[model_type].get(model_key, [])
+    for subdir in candidates:
+        full_path = os.path.join(root_dir, subdir)
+        if os.path.isdir(full_path):
+            return full_path
+    fallback = candidates[0] if candidates else model_key
+    return os.path.join(root_dir, fallback)
+
+
+def _get_best_model(model_dir: str) -> dict:
+    result = {"best_metric": None, "best_model_path": None}
+    try:
+        if not os.path.isdir(model_dir):
+            return result
+
+        checkpoints = []
+        for name in os.listdir(model_dir):
+            if not name.startswith("checkpoint-"):
+                continue
+            step = name.split("-")[-1]
+            if step.isdigit():
+                checkpoints.append((int(step), os.path.join(model_dir, name)))
+
+        if not checkpoints:
+            return result
+
+        latest_checkpoint = max(checkpoints, key=lambda item: item[0])[1]
+        state_path = os.path.join(latest_checkpoint, "train_state.json")
+        if not os.path.isfile(state_path):
+            state_path = os.path.join(latest_checkpoint, "trainer_state.json")
+
+        if not os.path.isfile(state_path):
+            result["best_model_path"] = latest_checkpoint
+            return result
+
+        with open(state_path, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+
+        result["best_metric"] = state.get("best_metric")
+        best_ckpt = state.get("best_model_checkpoint", latest_checkpoint)
+        if isinstance(best_ckpt, str) and best_ckpt and not os.path.isabs(best_ckpt):
+            best_ckpt = os.path.join(model_dir, best_ckpt)
+        result["best_model_path"] = best_ckpt
+        return result
+    except Exception:
+        return result
+
+
+def generate_batch(
+    model,
+    model_inputs,
+    processor,
+    max_tokens=256,
+):
     try:
         inputs = model_inputs.to(model.device)
-        # Generation
-        print("Generating response...")
-        task_name = (task or "").strip().lower()
-        gen_kwargs = {"max_new_tokens": max_tokens, "do_sample": False}
-        if task_name in ["explanation", "detection_explanation"]:
-            gen_kwargs = {
-                "max_new_tokens": max_tokens,
-                "do_sample": True,
-                "temperature": 0.3,
-                "top_p": 0.9,
-                "top_k": 50,
-            }
+        print("Generating response (sampling pass)...")
+        sample_kwargs = {
+            "max_new_tokens": max_tokens,
+            "do_sample": True,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "top_k": 40,
+            "repetition_penalty": 1.05,
+        }
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                **gen_kwargs,
+                **sample_kwargs,
             )
+        generated_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, output_ids)]
+        outputs = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-        # Decode while trimming the prompt tokens
-        generated_ids = [
-            out[len(ins):] for ins, out in zip(inputs.input_ids, output_ids)
-        ]
-        return processor.batch_decode(generated_ids, skip_special_tokens=True)
+        invalid_indices = []
+        for idx, text in enumerate(outputs):
+            try:
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    invalid_indices.append(idx)
+            except Exception:
+                invalid_indices.append(idx)
+
+        if invalid_indices:
+            print(
+                "Retrying deterministic decode for malformed JSON outputs: "
+                f"{len(invalid_indices)}/{len(outputs)}"
+            )
+            deterministic_kwargs = {"max_new_tokens": max_tokens, "do_sample": False}
+            with torch.no_grad():
+                deterministic_ids = model.generate(
+                    **inputs,
+                    **deterministic_kwargs,
+                )
+            deterministic_generated = [
+                out[len(ins):] for ins, out in zip(inputs.input_ids, deterministic_ids)
+            ]
+            deterministic_outputs = processor.batch_decode(
+                deterministic_generated, skip_special_tokens=True
+            )
+            for idx in invalid_indices:
+                outputs[idx] = deterministic_outputs[idx]
+
+        still_invalid = []
+        for idx, text in enumerate(outputs):
+            try:
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    still_invalid.append(idx)
+            except Exception:
+                still_invalid.append(idx)
+
+        if still_invalid:
+            print(
+                "Forcing fallback JSON object for outputs still malformed after retry: "
+                f"{len(still_invalid)}"
+            )
+            for idx in still_invalid:
+                outputs[idx] = "{}"
+
+        return outputs
 
     except Exception as e:
-        task_label = (task or "").strip().lower() or "<unknown>"
-        print(f"Generate batch failed for task={task_label}: {e}")
+        print(f"Generate batch failed: {e}")
         return []
 
 
+def _normalize_modality(value) -> str:
+    modality = str(value or "").strip().lower()
+    if modality in VALID_MODALITIES:
+        return modality
+    raise ValueError(
+        f"Invalid modality '{value}'. Expected one of: {sorted(VALID_MODALITIES)}"
+    )
 
-def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=None):
+
+def _build_model_inputs(model_key: str, batch_data, mode: str, processor):
+    if model_key.startswith("aya"):
+        return aya_inference_collator(batch_data=batch_data, mode=mode, processor=processor)
+    if model_key.startswith("llama"):
+        return llama_inference_collator(batch_data=batch_data, mode=mode, processor=processor)
+    if model_key.startswith("qwen"):
+        return qwen_inference_collator(batch_data=batch_data, mode=mode, processor=processor)
+    if model_key.startswith("gemma"):
+        return gemma_inference_collator(batch_data=batch_data, mode=mode, processor=processor)
+    raise ValueError(f"Unknown model key:{model_key}")
+
+
+def _map_gt_label(value) -> str:
     try:
-        if modes is None:
-            modes = ["both", "text", "image"]
+        gt_idx = int(value)
+    except (TypeError, ValueError):
+        gt_raw = str(value or "").strip().lower()
+        if gt_raw in {"sarcastic", "1"}:
+            return "sarcastic"
+        if gt_raw in {"unknown", "2"}:
+            return "unknown"
+        return "non_sarcastic"
+
+    if gt_idx == 1:
+        return "sarcastic"
+    if gt_idx == 2:
+        return "unknown"
+    return "non_sarcastic"
+
+
+def run_vlm_generation(model_key: str, checkpoint_path, model_type: str, max_tokens=256):
+    try:
         basemodel = BaseModels()
         base_model_id = basemodel.models[model_key]
         model_class = basemodel.get_class(model_key)
@@ -131,90 +274,75 @@ def run_vlm_generation(model_key: str, checkpoint_path, max_tokens=256, modes=No
         results_dir = get_sft_result_dir(model_key)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         task_outputs = {}
-        for task in ["detection_explanation", "explanation"]:  #, "detection"
-            ds = get_test_data(task=task)
-            loader = DataLoader(
-                ds,
-                batch_size=Logistics().infer_bathc_size,
-                collate_fn=lambda b: b,
-            )
-            task_dir = os.path.join(results_dir, timestamp)
-            os.makedirs(task_dir, exist_ok=True)
-            results_path = os.path.join(task_dir, f"{task}.jsonl")
-            task_outputs[task] = results_path
-            written_count = 0
-            failed_gen_count = 0
-            with open(results_path, "w", encoding="utf-8") as handle:
-                for batch in tqdm(loader, desc="Test", leave=False):
-                    for mode in modes:
-                        print(f"INFERENCE MODE:{mode}")
-                        if model_key.startswith("aya"):
-                            model_inputs = aya_inference_collator(
-                                batch_data=batch,
-                                mode=mode,
-                                processor=processor)
-                        elif model_key.startswith('llama'):
-                            model_inputs = llama_inference_collator(
-                                batch_data=batch,
-                                mode=mode,
-                                processor=processor
-                            )
-                        elif model_key.startswith('qwen'):
-                            model_inputs = qwen_inference_collator(
-                                batch_data=batch,
-                                mode=mode,
-                                processor=processor)
-                        elif model_key.startswith('gemma'):
-                            model_inputs = gemma_inference_collator(
-                                batch_data=batch,
-                                mode=mode,
-                                processor=processor
-                            )
-                        else:
-                            raise ValueError(f"Unknown model key:{model_key}")
-                        # generate
-                        if model_inputs is not None:
-                            outputs = generate_batch(
-                                model=model,
-                                model_inputs=model_inputs,
-                                processor=processor,
-                                max_tokens=max_tokens,
-                                task=task
-                            )
-                            if not outputs:
-                                failed_gen_count += len(batch)
-                                print(
-                                    "Skipping empty outputs for "
-                                    f"model={model_key}, task={task}, mode={mode}, "
-                                    f"batch_size={len(batch)}, checkpoint={checkpoint_path}"
-                                )
-                                continue
-                            for example, output in zip(batch, outputs):
-                                gt_idx = int(example.get("label_gt"))
-                                record = {
-                                    "mode": mode,
-                                    "gt": "sarcastic" if gt_idx == 1 else ("unknown" if gt_idx == 2 else "non_sarcastic"),
-                                    "task": example.get("task"),
-                                    "query": example.get("query"),
-                                    "target_json": example.get("target_json"),
-                                    "output": output,
-                                    "quality_flags": example.get("quality_flags"),
-                                    "id": example.get("id"),
-                                    "source": example.get("source"),
-                                    "model_key": model_key,
-                                }
-                                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                                written_count += 1
-                                # print(f"Example meta: {record}\nOutput:\n{output}")
-                        else:
-                            raise RuntimeError(f"failed to generate model input for {model_key}")
-                    # for testing purpose
-                    # break
-            print(
-                "##########################\n"
-                f"Total examples written for task={task}: {written_count}\n"
-                f"Total generation failures for task={task}: {failed_gen_count}"
-            )
+        task = "all"
+        ds = get_test_data()
+        loader = DataLoader(
+            ds,
+            batch_size=Logistics().infer_bathc_size,
+            collate_fn=lambda b: b,
+        )
+        task_dir = os.path.join(results_dir, timestamp)
+        os.makedirs(task_dir, exist_ok=True)
+        results_path = os.path.join(task_dir, f"{task}.jsonl")
+        task_outputs[task] = results_path
+        written_count = 0
+        failed_gen_count = 0
+        with open(results_path, "w", encoding="utf-8") as handle:
+            for batch in tqdm(loader, desc="Test", leave=False):
+                grouped_batches = {}
+                for example in batch:
+                    grouped_mode = _normalize_modality(example.get("modality"))
+                    grouped_batches.setdefault(grouped_mode, []).append(example)
+
+                for mode, grouped_batch in grouped_batches.items():
+                    print(
+                        f"INFERENCE MODE:{mode} BATCH_SIZE:{len(grouped_batch)}"
+                    )
+                    model_inputs = _build_model_inputs(
+                        model_key=model_key,
+                        batch_data=grouped_batch,
+                        mode=mode,
+                        processor=processor,
+                    )
+                    if model_inputs is None:
+                        raise RuntimeError(f"failed to generate model input for {model_key}")
+
+                    outputs = generate_batch(
+                        model=model,
+                        model_inputs=model_inputs,
+                        processor=processor,
+                        max_tokens=max_tokens,
+                    )
+                    if not outputs:
+                        failed_gen_count += len(grouped_batch)
+                        print(
+                            "Skipping empty outputs for "
+                            f"model={model_key}, task={task}, mode={mode}, "
+                            f"batch_size={len(grouped_batch)}, checkpoint={checkpoint_path}"
+                        )
+                        continue
+                    for example, output in zip(grouped_batch, outputs):
+                        record = {
+                            "modality": mode,
+                            "mode": mode,
+                            "model_type": model_type,
+                            "gt": _map_gt_label(example.get("label_gt")),
+                            "task": task,
+                            "query": example.get("query"),
+                            "target_json": example.get("target_json"),
+                            "output": output,
+                            "quality_flags": example.get("quality_flags"),
+                            "id": example.get("id"),
+                            "source": example.get("source"),
+                            "model_key": model_key,
+                        }
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        written_count += 1
+        print(
+            "##########################\n"
+            f"Total examples written for task={task}: {written_count}\n"
+            f"Total generation failures for task={task}: {failed_gen_count}"
+        )
         print("Complted Generating")
         return task_outputs
     except Exception as e: 
@@ -227,31 +355,40 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        raise SystemExit("Usage: python -m src.inference.run_inference <model_key>")
+        raise SystemExit(
+            "Usage: python -m src.inference.run_inference <model_key> [model_type]"
+        )
 
     model_key = sys.argv[1].strip().lower()
-    saved_model_path = Path(
-        os.path.join(Logistics().project_root_dir, Logistics().models_output_dir, "sft")
-    )
-    models_dirs = {
-        "aya": "aya_vision_8b",
-        "llama": "llama32",
-        "gemma": "gemma3",
-        "qwen": "qwen3_vl_8b",
-    }
+    model_type = sys.argv[2].strip().lower() if len(sys.argv) >= 3 else "sft"
+    if model_type not in VALID_MODEL_TYPES:
+        raise SystemExit(
+            f"Unknown model_type: {model_type} (expected: {sorted(VALID_MODEL_TYPES)})"
+        )
 
-    if model_key not in models_dirs:
+    if model_key not in BaseModels().models:
         raise SystemExit(f"Unknown model_key: {model_key}")
+    if model_type == "mdpo" and model_key not in MDPO_MODEL_KEYS:
+        raise SystemExit(
+            f"model_type=mdpo supports only {sorted(MDPO_MODEL_KEYS)}; got {model_key}"
+        )
 
-    model_dir = os.path.join(saved_model_path, models_dirs[model_key])
-    best_model = get_sft_best_model(model_dir)
+    model_dir = _resolve_model_dir(model_key=model_key, model_type=model_type)
+    best_model = _get_best_model(model_dir)
     best_metric = best_model.get("best_metric")
     best_chkpt_path = best_model.get("best_model_path")
     if not best_chkpt_path:
-        raise SystemExit(f"No checkpoint found for {model_key} under {model_dir}")
-    print(f"Running inference for {model_key} from {best_chkpt_path}")
+        raise SystemExit(
+            f"No checkpoint found for {model_key} under {model_dir} "
+            f"(model_type={model_type})"
+        )
+    print(
+        f"Running inference for {model_key} ({model_type}) from {best_chkpt_path} "
+        f"[best_metric={best_metric}]"
+    )
     run_vlm_generation(
         model_key=model_key,
         checkpoint_path=best_chkpt_path,
+        model_type=model_type,
         max_tokens=Logistics().gen_max_token,
     )

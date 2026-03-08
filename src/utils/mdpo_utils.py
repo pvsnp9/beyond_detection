@@ -194,110 +194,117 @@ def evaluate_mdpo(
 
     was_training = model.training
     model.eval()
+    tokenizer = getattr(processor, "tokenizer", None)
+    original_padding_side = getattr(tokenizer, "padding_side", None) if tokenizer is not None else None
+    if tokenizer is not None and original_padding_side is not None:
+        tokenizer.padding_side = "left"
 
-    eval_examples = _select_subset(eval_dataset, max_samples)
-    if not isinstance(eval_examples, list):
-        eval_examples = list(eval_examples)
+    try:
+        eval_examples = _select_subset(eval_dataset, max_samples)
+        if not isinstance(eval_examples, list):
+            eval_examples = list(eval_examples)
 
-    total = 0
-    valid_json = 0
-    schema_errors: Dict[str, int] = {}
-    hallucinated = 0
-    pivot_ok = 0
-    consecutive_ids_ok = 0
-    length_ratios: List[float] = []
-    chosen_rejected_ratios: List[float] = []
+        total = 0
+        valid_json = 0
+        schema_errors: Dict[str, int] = {}
+        hallucinated = 0
+        pivot_ok = 0
+        consecutive_ids_ok = 0
+        length_ratios: List[float] = []
+        chosen_rejected_ratios: List[float] = []
 
-    def _process_example(text: str, example: Dict[str, Any]):
-        nonlocal total, valid_json, hallucinated, pivot_ok, consecutive_ids_ok
-        total += 1
-        payload = _find_json_object(text)
-        if not isinstance(payload, dict):
-            schema_errors["invalid_json"] = schema_errors.get("invalid_json", 0) + 1
-            return
-        valid_json += 1
+        def _process_example(text: str, example: Dict[str, Any]):
+            nonlocal total, valid_json, hallucinated, pivot_ok, consecutive_ids_ok
+            total += 1
+            payload = _find_json_object(text)
+            if not isinstance(payload, dict):
+                schema_errors["invalid_json"] = schema_errors.get("invalid_json", 0) + 1
+                return
+            valid_json += 1
 
-        ok_schema, errs = _json_schema_checks(payload)
-        if not ok_schema:
-            for err in errs:
-                schema_errors[err] = schema_errors.get(err, 0) + 1
+            ok_schema, errs = _json_schema_checks(payload)
+            if not ok_schema:
+                for err in errs:
+                    schema_errors[err] = schema_errors.get(err, 0) + 1
 
-        if _is_consecutive_ids(payload.get("visual_facts")):
-            consecutive_ids_ok += 1
+            if _is_consecutive_ids(payload.get("visual_facts")):
+                consecutive_ids_ok += 1
 
-        if not _hallucination_flag(payload, example):
-            hallucinated += 0
-        else:
-            hallucinated += 1
+            if not _hallucination_flag(payload, example):
+                hallucinated += 0
+            else:
+                hallucinated += 1
 
-        if _pivot_consistent(payload):
-            pivot_ok += 1
+            if _pivot_consistent(payload):
+                pivot_ok += 1
 
-        chosen = str(example.get("chosen", "") or "")
-        if chosen:
-            length_ratios.append(_length_ratio(text, chosen))
-        rejected = str(example.get("rejected", "") or "")
-        if chosen and rejected:
-            chosen_rejected_ratios.append(_length_ratio(chosen, rejected))
+            chosen = str(example.get("chosen", "") or "")
+            if chosen:
+                length_ratios.append(_length_ratio(text, chosen))
+            rejected = str(example.get("rejected", "") or "")
+            if chosen and rejected:
+                chosen_rejected_ratios.append(_length_ratio(chosen, rejected))
 
-    batch_examples: List[Dict[str, Any]] = []
-    for example in eval_examples:
-        batch_examples.append(example)
-        if len(batch_examples) < batch_size:
-            continue
-        model_inputs = prompt_collator(batch_examples)
-        model_inputs = {
-            k: v.to(model.device) if torch.is_tensor(v) else v
-            for k, v in model_inputs.items()
-        }
-        generated = model.generate(
-            **model_inputs,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
-        )
-        texts = processor.batch_decode(generated, skip_special_tokens=True)
-        for text, ex in zip(texts, batch_examples):
-            _process_example(text, ex)
-        batch_examples = []
+        batch_examples: List[Dict[str, Any]] = []
+        for example in eval_examples:
+            batch_examples.append(example)
+            if len(batch_examples) < batch_size:
+                continue
+            model_inputs = prompt_collator(batch_examples)
+            model_inputs = {
+                k: v.to(model.device) if torch.is_tensor(v) else v
+                for k, v in model_inputs.items()
+            }
+            generated = model.generate(
+                **model_inputs,
+                do_sample=False,
+                temperature=0.0,
+                top_p=1.0,
+                max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
+            )
+            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            for text, ex in zip(texts, batch_examples):
+                _process_example(text, ex)
+            batch_examples = []
 
-    if batch_examples:
-        model_inputs = prompt_collator(batch_examples)
-        model_inputs = {
-            k: v.to(model.device) if torch.is_tensor(v) else v
-            for k, v in model_inputs.items()
-        }
-        generated = model.generate(
-            **model_inputs,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
-        )
-        texts = processor.batch_decode(generated, skip_special_tokens=True)
-        for text, ex in zip(texts, batch_examples):
-            _process_example(text, ex)
+        if batch_examples:
+            model_inputs = prompt_collator(batch_examples)
+            model_inputs = {
+                k: v.to(model.device) if torch.is_tensor(v) else v
+                for k, v in model_inputs.items()
+            }
+            generated = model.generate(
+                **model_inputs,
+                do_sample=False,
+                temperature=0.0,
+                top_p=1.0,
+                max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
+            )
+            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            for text, ex in zip(texts, batch_examples):
+                _process_example(text, ex)
 
-    metrics: Dict[str, Any] = {}
-    metrics["eval/num_samples"] = total
-    metrics["eval/json_valid_count"] = valid_json
-    metrics["eval/json_validity"] = valid_json / max(1, total)
-    metrics["eval/hallucination_rate"] = hallucinated / max(1, total)
-    metrics["eval/pivot_consistency"] = pivot_ok / max(1, total)
-    metrics["eval/visual_facts_id_consecutive_rate"] = consecutive_ids_ok / max(1, total)
-    if length_ratios:
-        metrics["eval/length_ratio_output_target"] = sum(length_ratios) / len(length_ratios)
-    if chosen_rejected_ratios:
-        metrics["eval/length_ratio_chosen_rejected"] = (
-            sum(chosen_rejected_ratios) / len(chosen_rejected_ratios)
-        )
-    for key, value in schema_errors.items():
-        metrics[f"eval/schema_error_types/{key}"] = value / max(1, total)
-
-    if was_training:
-        model.train()
-    return metrics
+        metrics: Dict[str, Any] = {}
+        metrics["eval/num_samples"] = total
+        metrics["eval/json_valid_count"] = valid_json
+        metrics["eval/json_validity"] = valid_json / max(1, total)
+        metrics["eval/hallucination_rate"] = hallucinated / max(1, total)
+        metrics["eval/pivot_consistency"] = pivot_ok / max(1, total)
+        metrics["eval/visual_facts_id_consecutive_rate"] = consecutive_ids_ok / max(1, total)
+        if length_ratios:
+            metrics["eval/length_ratio_output_target"] = sum(length_ratios) / len(length_ratios)
+        if chosen_rejected_ratios:
+            metrics["eval/length_ratio_chosen_rejected"] = (
+                sum(chosen_rejected_ratios) / len(chosen_rejected_ratios)
+            )
+        for key, value in schema_errors.items():
+            metrics[f"eval/schema_error_types/{key}"] = value / max(1, total)
+        return metrics
+    finally:
+        if tokenizer is not None and original_padding_side is not None:
+            tokenizer.padding_side = original_padding_side
+        if was_training:
+            model.train()
 
 
 def load_sft_adapter_models(

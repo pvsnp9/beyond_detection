@@ -45,7 +45,7 @@ class Logistics:
     teacher_model: str = "gpt-5.2"
     langs: List[str] = field(default_factory=lambda: ["en", "zh"])
     infer_bathc_size:int = 4
-    gen_max_token:int = 384 #512
+    gen_max_token:int = 512
 
     hf_sft_ds_id: str = "alita9/beyond_sarcasm_detection_sft"
     hf_dpo_ds_id: str = "alita9/sarcasm_understanding_dpo"

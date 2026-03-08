@@ -5,13 +5,14 @@ import os
 from datetime import datetime
 
 import torch
+from datasets import disable_caching
 from transformers import BitsAndBytesConfig, set_seed
 from transformers.trainer_utils import get_last_checkpoint
-from trl import DPOTrainer
 
 from config.logistics import ModelCards, build_dpo_cfg
-from src.collators.dpo_inference_collator import llama_dpo_inference_collator
+from src.collators.llama32_collator import Llama32VisionSFTCollator
 from src.datasets.loader import load_dpo_train_eval_dataset
+from src.train.llama32_dpo_trainer import Llama32DataCollatorForPreference, Llama32DPOTrainer
 from src.utils.env import resolve_tokens_and_env, set_runtime_env
 from src.utils.logging import init_wandb, log_run_metadata
 from src.utils.mdpo_utils import (
@@ -27,7 +28,15 @@ from src.utils.mdpo_utils import (
 
 def main() -> None:
     cfg = build_dpo_cfg(ModelCards().llama3_2vl)
+    # Mllama vision attention in this Transformers build is incompatible with
+    # flash_attention_2 (missing `is_causal` on MllamaVisionAttention at runtime).
+    # Force default attention for Llama32 DPO 
+    cfg["dpo_extras"].use_flash_attention_2 = False
+    # Avoid reusing stale map/tokenization artifacts between DPO runs.
+    disable_caching()
     set_seed(cfg["dpo"].seed)
+    # Keep eval conservative for Llama DPO memory headroom.
+    cfg["dpo"].eval_batch_size = 1
 
     resolved = resolve_tokens_and_env(cfg["logistics"])
     set_runtime_env(resolved)
@@ -102,22 +111,28 @@ def main() -> None:
     eval_dataset = _select_subset(eval_dataset, cfg["dataset"]["max_eval_samples"])
     model.config.use_cache = cfg["dpo_extras"].use_cache
 
-    def prompt_collator(batch):
-        return llama_dpo_inference_collator(
-            batch,
-            mode="both",
-            processor=processor,
-            max_length=cfg["dpo"].max_length,
-        )
+    eval_collator = Llama32VisionSFTCollator(
+        processor=processor,
+        training=False,
+        max_length=cfg["dpo"].max_length,
+        image_key=cfg["collator"]["image_key"],
+        query_key=cfg["collator"]["prompt_key"],
+        caption_key=cfg["collator"]["caption_key"],
+        target_key="chosen",
+        system_prompt=cfg["collator"]["system_prompt"],
+    )
 
     dpo_args = build_dpo_config(cfg, adapter_output_dir, run_name)
-    trainer = DPOTrainer(
+    dpo_args.truncation_mode = "keep_start"
+    data_collator = Llama32DataCollatorForPreference(pad_token_id=processor.tokenizer.pad_token_id)
+    trainer = Llama32DPOTrainer(
         model=model,
         ref_model=None,
         args=dpo_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=processor,
+        data_collator=data_collator,
     )
     trainer.add_callback(MDPOTrainMetricsCallback(run))
     trainer.add_callback(
@@ -125,7 +140,7 @@ def main() -> None:
             model,
             processor,
             eval_dataset,
-            prompt_collator,
+            eval_collator,
             cfg,
         )
     )
@@ -156,12 +171,9 @@ def main() -> None:
     except Exception as exc:
         print(f"Failed to write training metadata: {exc}")
 
-    log_run_metadata(
-        cfg["logistics"],
-        run_name,
-        adapter_output_dir,
-        extra_metadata=training_meta,
-    )
+    log_run_metadata(run, training_meta)
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":
