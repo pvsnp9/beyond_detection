@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 REPLACEMENT_WORDS = {
@@ -26,6 +26,7 @@ class Logistics:
     sft_log_dir: str = "outputs/logs/sft"
     results_dir:str = "outputs/results"
     reports_dir: str = "outputs/reports"
+    hall_report_dir: str = "outputs/reports/nlp/hall"
 
     data_generation_dir: str = "data/generated"
     combined_data_dir: str = f"{data_generation_dir}/combined"
@@ -390,3 +391,72 @@ class Stats:
     failed_schema: int = 0
     failed_sanity: int = 0
     api_errors: int = 0
+
+
+@dataclass
+class HallEvalConfig:
+    logistics: Logistics = field(default_factory=Logistics)
+    tau: float = 0.65
+    tau_e: float = 0.62
+    tau_c: float = 0.60
+    backend: str = "sbert"
+    model_name: Optional[str] = None
+    batch_size: int = 32
+    device: Optional[str] = None
+    match_mode: str = "max_weight"
+    top_k: Optional[int] = None
+    max_claims: int = 20
+    min_clause_split_len: int = 120
+    skip_invalid: bool = False
+    seed: int = 42
+
+
+@dataclass
+class ParsedRecord:
+    id: str
+    model_key: Optional[str]
+    source: Optional[str]
+    modality: Optional[str]
+    quality_flags: Tuple[str, ...]
+    gt: Optional[str]
+    query: Optional[str]
+    ref_facts: List[str]
+    pred_facts: List[str]
+    explanation: str
+    ref_explanation: str = ""
+    ref_incongruity: str = ""
+    ref_text_literal: str = ""
+    need_explanation: Optional[bool] = None
+    missing_modalities_pred: Tuple[str, ...] = field(default_factory=tuple)
+    missing_modalities_ref: Tuple[str, ...] = field(default_factory=tuple)
+    is_valid: bool = True
+    error: Optional[str] = None
+
+
+@dataclass
+class FactCounts:
+    tp: int
+    fp: int
+    fn: int
+    n_ref: int
+    n_pred: int
+    mean_match_sim: Optional[float] = None
+
+
+@dataclass
+class FactMetrics:
+    add: float
+    omit: float
+    p: float
+    r: float
+    f1: float
+
+
+@dataclass
+class ExplMetrics:
+    eg: float
+    eh: float
+    ec: float
+    eqs: Optional[float]
+    k_claims: int
+    len_tokens: int

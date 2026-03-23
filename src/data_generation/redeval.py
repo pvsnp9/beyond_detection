@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -11,6 +12,15 @@ except ModuleNotFoundError:
 
     sys.path.append(str(Path(__file__).resolve().parents[2]))
     from config.logistics import Logistics
+
+TEXT_MISSING_EXPLANATION = (
+    "Image is missing, so I cannot compare the caption against visual context "
+    "to judge cross-modal incongruity"
+)
+IMAGE_MISSING_EXPLANATION = (
+    "Caption is missing, so I cannot infer the literal meaning or intended tone "
+    "to check for cross-modal incongruity."
+)
 
 
 def _resolve_input_path(redeval_dir: Path) -> Path:
@@ -62,6 +72,37 @@ def _write_jsonl(path: Path, records: List[Dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for rec in records:
             handle.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON at {path}:{line_no}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"Expected JSON object at {path}:{line_no}")
+            rows.append(row)
+    return rows
+
+
+def _parse_target_json(raw: Any, row_id: str) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Malformed target_json for row id={row_id}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"target_json must be a JSON object for row id={row_id}")
+        return payload
+    raise ValueError(f"target_json must be dict or JSON string for row id={row_id}")
 
 
 def _print_stats(records: List[Dict[str, Any]], tag: str) -> None:
@@ -211,8 +252,83 @@ def build_redeval_ood() -> None:
         raise
 
 
+def make_text_modality_target(input_path: Path | None = None) -> Dict[str, int]:
+    logistics = Logistics()
+    source_path = input_path or (
+        Path(logistics.project_root_dir) / logistics.processed_data_dir / "redeval" / "ood.jsonl"
+    )
+    rows = _read_jsonl(source_path)
+
+    transformed: List[Dict[str, Any]] = []
+    kept_text = 0
+    kept_image = 0
+    kept_both = 0
+
+    for row in rows:
+        modality = str(row.get("modality", "")).strip().lower()
+        if modality not in {"text", "image", "both"}:
+            continue
+
+        rec = dict(row)
+        if modality == "both":
+            kept_both += 1
+            transformed.append(rec)
+            continue
+
+        rec["label_gt"] = "unknown"
+        row_id = str(rec.get("id", "<missing_id>"))
+        target = _parse_target_json(rec.get("target_json"), row_id=row_id)
+
+        if modality == "text":
+            target["visual_facts"] = []
+            target["evidence_fact_ids"] = []
+            target["label"] = "unknown"
+            target["incongruity"] = ""
+            target["explanation"] = TEXT_MISSING_EXPLANATION
+            target["missing_modalities"] = ["image"]
+            kept_text += 1
+        else:
+            target["label"] = "unknown"
+            target["text_literal"] = ""
+            target["incongruity"] = ""
+            target["explanation"] = IMAGE_MISSING_EXPLANATION
+            target["missing_modalities"] = ["text"]
+            kept_image += 1
+
+        rec["target_json"] = json.dumps(target, ensure_ascii=False)
+        transformed.append(rec)
+
+    stats = {
+        "total_in": len(rows),
+        "kept_text": kept_text,
+        "kept_image": kept_image,
+        "kept_both": kept_both,
+        "dropped_both_or_other": len(rows) - kept_text - kept_image - kept_both,
+        "written": len(transformed),
+    }
+
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = source_path.parent / f".{source_path.name}.tmp"
+    _write_jsonl(tmp_path, transformed)
+    try:
+        os.replace(tmp_path, source_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+    print(f"Updated {source_path}")
+    for key in ("total_in", "kept_text", "kept_image", "kept_both", "dropped_both_or_other", "written"):
+        print(f"{key}={stats[key]}")
+    return stats
+
+
+
+
 def main() -> None:
-    build_redeval_ood()
+    pass
+    # make_text_modality_target()
+    # build_redeval_ood()
 
 
 if __name__ == "__main__":

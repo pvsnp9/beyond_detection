@@ -5,9 +5,17 @@ from PIL import Image
 from config.queries import Queries
 
 
+def _resolve_query(example, model_type: str = "sft") -> str:
+    mtype = str(model_type or "sft").strip().lower()
+    if mtype == "mdpo":
+        return Queries().DPO_QUERY.strip()
+    return (example.get("query") or "").strip()
+
+
 def aya_inference_collator(
     batch_data,
     mode: str = None,
+    model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
 ):
@@ -45,7 +53,7 @@ def aya_inference_collator(
         images_batch = None if mode == "text" else []
 
         for example in examples:
-            query = (example.get("query") or "").strip()
+            query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
             user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
             content = []
@@ -100,6 +108,7 @@ def aya_inference_collator(
 def qwen_inference_collator(
     batch_data,
     mode: str = None,
+    model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
 ):
@@ -137,7 +146,7 @@ def qwen_inference_collator(
         images_batch = None if mode == "text" else []
 
         for example in examples:
-            query = (example.get("query") or "").strip()
+            query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
             user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
 
@@ -171,7 +180,8 @@ def qwen_inference_collator(
             "text": text_inputs,
             "return_tensors": "pt",
             "padding": True,
-            "truncation": True,
+            # Qwen-VL can fail with image/text token mismatch when truncation clips multimodal placeholders.
+            "truncation": False,
         }
         if max_length is not None:
             processor_kwargs["max_length"] = max_length
@@ -187,6 +197,7 @@ def qwen_inference_collator(
 def llama_inference_collator(
     batch_data,
     mode: str = None,
+    model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
 ):
@@ -224,7 +235,7 @@ def llama_inference_collator(
         images_batch = None if mode == "text" else []
 
         for example in examples:
-            query = (example.get("query") or "").strip()
+            query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
             user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
 
@@ -274,6 +285,7 @@ def llama_inference_collator(
 def gemma_inference_collator(
     batch_data,
     mode: str = None,
+    model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
 ):
@@ -311,7 +323,7 @@ def gemma_inference_collator(
         images_batch = None if mode == "text" else []
 
         for example in examples:
-            query = (example.get("query") or "").strip()
+            query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
             user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
 

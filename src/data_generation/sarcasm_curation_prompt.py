@@ -164,6 +164,144 @@ class SarcasmCurationSpec:
         """Prints the exact object you pass as text.format."""
         print(json.dumps(self.json_schema, indent=2, ensure_ascii=False))
 
+@dataclass(frozen=True)
+class SarcasmOODPrompts:
+    system: str
+    user_caption_template: str
+
+    def build_user_caption(self, caption: str) -> str:
+        return self.user_caption_template.format(caption=(caption or "").strip())
+
+
+@dataclass(frozen=True)
+class SarcasmOODGen:
+    """
+    Target-only prompt + Structured Outputs JSON schema for OOD data.
+    This version is for generating grounded targets from image(s) + caption.
+    No filtering, no politics screening, no keep/discard decision.
+    """
+
+    prompts: SarcasmOODPrompts
+    json_schema: Dict[str, Any]
+
+    @staticmethod
+    def v1() -> "SarcasmOODGen":
+        schema_name = "sarcasm_ood_gen_v1"
+        schema_version = "sarcasm_ood_gen_v1"
+        system_prompt = """
+You are an expert multimodal sarcasm annotator.
+
+Your job is to generate a grounded TARGET annotation for the given image and caption.
+You MUST follow the procedure below in order, with ZERO deviations.
+This is NOT a curation task and NOT a filtering task.
+Always return one complete annotation in valid JSON only.
+
+Guidelines:
+1) Use only the provided image and caption.
+2) Ground all reasoning in directly visible visual evidence and the literal meaning of the caption.
+3) Do not speculate about hidden intent, identity, politics, or background context unless explicitly shown.
+4) visual_facts:
+   - Write 3 to 6 short, concrete, factual observations from the image.
+   - No interpretation, no sarcasm judgment inside visual_facts.
+5) text_literal:
+   - State the caption's face-value meaning plainly.
+6) label:
+   - "sarcastic" if the image and caption create a clear contradiction, mismatch, reversal, or ironic tension.
+   - "non_sarcastic" if the caption and image align or sarcasm is not sufficiently supported.
+   - Be conservative: when uncertain, choose "non_sarcastic".
+7) incongruity:
+   - For sarcastic cases, describe the specific mismatch between the literal caption meaning and the visual evidence.
+   - For non_sarcastic cases, use an empty string "".
+8) explanation:
+   - Give a concise grounded explanation of why the pair is sarcastic or non_sarcastic.
+   - Must be supported by visual_facts and text_literal.
+   - Do not invent unseen details.
+9) quality_flags:
+   - Return a list of quality/safety flags.
+   - Use [] when there are no concerns.
+10) Output only one valid JSON object matching the schema.
+""".strip()
+
+        caption_template = """
+Generate the target annotation for the following image-caption pair.
+
+CAPTION:
+{caption}
+""".strip()
+
+        prompts = SarcasmOODPrompts(
+            system=system_prompt,
+            user_caption_template=caption_template,
+        )
+
+        inner_schema = {
+            "name": schema_name,
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "schema_version",
+                    "language",
+                    "label",
+                    "visual_facts",
+                    "text_literal",
+                    "incongruity",
+                    "explanation",
+                    "quality_flags",
+                ],
+                "properties": {
+                    "schema_version": {
+                        "type": "string",
+                        "const": schema_version
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Dominant language of the caption/output, e.g. 'en', 'zh'."
+                    },
+                    "label": {
+                        "type": "string",
+                        "enum": ["sarcastic", "non_sarcastic"],
+                        "description": "Final sarcasm label for the image-caption pair."
+                    },
+                    "visual_facts": {
+                        "type": "array",
+                        "description": "3 to 6 factual, concrete visual observations grounded in the image(s).",
+                        "minItems": 3,
+                        "maxItems": 6,
+                        "items": {"type": "string"}
+                    },
+                    "text_literal": {
+                        "type": "string",
+                        "description": "Literal face-value meaning of the caption."
+                    },
+                    "incongruity": {
+                        "type": "string",
+                        "description": "Specific mismatch between image evidence and text_literal. Empty string if label is non_sarcastic."
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "Concise grounded explanation of why the pair is sarcastic or non_sarcastic."
+                    },
+                    "quality_flags": {
+                        "type": "array",
+                        "description": "Optional annotation quality/risk flags.",
+                        "items": {"type": "string"}
+                    }
+                }
+            }
+        }
+
+        json_schema = {
+            "type": "json_schema",
+            "name": inner_schema["name"],
+            "strict": inner_schema["strict"],
+            "schema": inner_schema["schema"],
+        }
+
+        return SarcasmOODGen(prompts=prompts, json_schema=json_schema)
+
+
 
 
 # if __name__ == "__main__":

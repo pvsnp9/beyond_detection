@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 import os
 import json
 from config.logistics import Logistics
+from src.utils.metrics import run_sarcasm_audit
 
 
 def _parse_timestamp_dir(name: str) -> Optional[float]:
@@ -191,16 +192,64 @@ def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[s
         raise e
 
 
+def _pick_multiclass_input_file(model_files: List[str]) -> Optional[str]:
+    preferred_names = ("all.jsonl", "merged.jsonl")
+    for preferred_name in preferred_names:
+        for file_path in model_files:
+            if Path(file_path).name == preferred_name:
+                return file_path
+
+    for file_path in model_files:
+        if not file_path.endswith("explanation.jsonl"):
+            return file_path
+    return None
+
+
+def compute_multiclass_report(
+    files: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    try:
+        files = files or {}
+        report_dir = Path(os.path.join(Logistics().reports_dir, "cls"))
+        report_dir.mkdir(parents=True, exist_ok=True)
+        out_path = report_dir / f"multiclass_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+
+        results: Dict[str, Dict[str, Any]] = {}
+        with out_path.open("w", encoding="utf-8") as out_handle:
+            for model_name, model_files in files.items():
+                input_file = _pick_multiclass_input_file(model_files)
+                if input_file is None:
+                    print(f"No compatible file found for model: {model_name}")
+                    continue
+
+                print(
+                    f"Computing multiclass metrics for model: {model_name}, file: {input_file}"
+                )
+                metrics = run_sarcasm_audit(input_file)
+                payload = {"model": model_name, "file": input_file, "metrics": metrics}
+                out_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                results[model_name] = payload
+
+        print(f"Saved multiclass report to: {out_path}")
+        return results
+    except Exception as e:
+        print(f"Exception occured while computing multiclass report: {e}")
+        raise e
+
+
 
 if __name__ == "__main__":
     gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
+    qwen = dict([gen_files.popitem()])
+    print(f"Using: {qwen}")
     # #code for merging explanation and detection_explanation files into one detection_explanation file
-    for model_name, files in gen_files.items():
-        print(f"Processing model: {model_name} with files: {files}")
-        if len(files) >= 2:
-            merge_files(files)
-        else: print(f"Not enough files to merge for model: {model_name}")
-        print("-----"*20)
+    # for model_name, files in gen_files.items():
+    #     print(f"Processing model: {model_name} with files: {files}")
+    #     if len(files) >= 2:
+    #         merge_files(files)
+    #     else: print(f"Not enough files to merge for model: {model_name}")
+    #     print("-----"*20)
     
-    updated_files= get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
-    compute_f1(updated_files)
+    # updated_files= get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
+    compute_f1(qwen)
+    compute_multiclass_report(qwen)
