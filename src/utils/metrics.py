@@ -64,7 +64,19 @@ def _is_modality_aware_success(modality, missing_modalities):
     return False
 
 
-def run_sarcasm_audit(jsonl_path):
+def _iter_jsonl(jsonl_path):
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                yield None
+
+
+def audit_records(records):
     metrics = {
         "total_sample": 0,
         "total_image_only_sample": 0,
@@ -77,55 +89,51 @@ def run_sarcasm_audit(jsonl_path):
         "unimodal_total": 0,
         "y_true": [],
         "y_pred": [],
+        "modes": [],
     }
 
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
+    for item in records:
+        if item is None:
             metrics["total_sample"] += 1
-            try:
-                item = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
+            continue
+
+        metrics["total_sample"] += 1
+        gt_label = item.get("gt")
+        modality = item.get("modality")
+        if modality == "image":
+            metrics["total_image_only_sample"] += 1
+        elif modality == "text":
+            metrics["total_text_only_sample"] += 1
+
+        try:
+            output_raw = item.get("output")
+            output = json.loads(output_raw) if isinstance(output_raw, str) else output_raw
+            if not isinstance(output, dict):
                 continue
+            metrics["parse_success"] += 1
+        except (json.JSONDecodeError, TypeError):
+            continue
 
-            gt_label = item.get("gt")
-            modality = item.get("modality")
-            if modality == "image":
-                metrics["total_image_only_sample"] += 1
-            elif modality == "text":
-                metrics["total_text_only_sample"] += 1
+        if _is_schema_valid(output):
+            metrics["schema_valid"] += 1
 
-            try:
-                output_raw = item.get("output")
-                output = json.loads(output_raw)
-                if not isinstance(output, dict):
-                    continue
-                metrics["parse_success"] += 1
-            except (json.JSONDecodeError, TypeError):
-                continue
+        if _has_constraint_violation(output):
+            metrics["constraint_violation"] += 1
 
-            if _is_schema_valid(output):
-                metrics["schema_valid"] += 1
+        if _is_modality_aware_success(modality, output.get("missing_modalities")):
+            metrics["modality_aware_success"] += 1
 
-            if _has_constraint_violation(output):
-                metrics["constraint_violation"] += 1
+        pred_label = output.get("label")
+        gt_label_str = str(gt_label) if gt_label is not None else "__missing_gt__"
+        pred_label_str = pred_label if isinstance(pred_label, str) else "__invalid_label__"
+        metrics["y_true"].append(gt_label_str)
+        metrics["y_pred"].append(pred_label_str)
+        metrics["modes"].append(item.get("mode", "unknown"))
 
-            if _is_modality_aware_success(modality, output.get("missing_modalities")):
-                metrics["modality_aware_success"] += 1
-
-            pred_label = output.get("label")
-            gt_label_str = str(gt_label) if gt_label is not None else "__missing_gt__"
-            pred_label_str = pred_label if isinstance(pred_label, str) else "__invalid_label__"
-            metrics["y_true"].append(gt_label_str)
-            metrics["y_pred"].append(pred_label_str)
-
-            if modality in ["text", "image"]:
-                metrics["unimodal_total"] += 1
-                if pred_label_str == gt_label_str:
-                    metrics["unimodal_correct"] += 1
+        if modality in ["text", "image"]:
+            metrics["unimodal_total"] += 1
+            if pred_label_str == gt_label_str:
+                metrics["unimodal_correct"] += 1
 
     parsed_count = metrics["parse_success"]
     unique_labels = sorted(set(metrics["y_true"]) | set(metrics["y_pred"]))
@@ -182,4 +190,12 @@ def run_sarcasm_audit(jsonl_path):
         "unimodal_accuracy": float(
             _safe_divide(metrics["unimodal_correct"], metrics["unimodal_total"])
         ),
+        "labels": unique_labels,
+        "y_true": metrics["y_true"],
+        "y_pred": metrics["y_pred"],
+        "modes": metrics["modes"],
     }
+
+
+def run_sarcasm_audit(jsonl_path):
+    return audit_records(_iter_jsonl(jsonl_path))

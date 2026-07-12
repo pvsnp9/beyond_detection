@@ -53,7 +53,8 @@ class Logistics:
     hf_token:any = None
     wandb_token: any = None
     wandb_project: str = "sarcasm_sft"
-    wandb_dpo_project: str ="sarcasn_dpo"
+    wandb_dpo_project: str ="sarcasm_dpo"
+    wandb_freeform_project: str = "free_form_sft"
     wandb_tags: List[str] = field(default_factory=lambda: ["sarcasm", "sft"])
     wandb_dpo_tags: List[str] = field(default_factory=lambda: ["sarcasm", "dpo"])
 
@@ -223,6 +224,26 @@ class DPOParams:
 
 
 # ------------------------------
+# mDPO loss parameters (Wang et al. 2024, arXiv:2406.11839)
+# total loss = L_DPO + conditional_weight * L_CoPO + anchor_weight * L_Anchor
+# ------------------------------
+@dataclass
+class MDPOParams:
+    use_conditional: bool = True      # conditional image-preference term (both-modality rows only)
+    use_anchor: bool = True           # anchor term keeping chosen reward positive
+    anchor_delta: float = 0.0
+    conditional_weight: float = 1.0
+    anchor_weight: float = 1.0
+    # corrupted image = random crop retaining U(crop_frac_min, crop_frac_max) of the
+    # area, resized back to the original dims so vision grids/token counts match
+    crop_frac_min: float = 0.01
+    crop_frac_max: float = 0.20
+    max_image_side: int = 1536
+    max_image_pixels: int = 6_000_000
+    sft_merged_root: str = "/projects/mzampier/tsuyog/beyond_detection/outputs/models/sft_merged"
+
+
+# ------------------------------
 # (Optional) DPOConfig - extras you should pass explicitly
 # ------------------------------
 @dataclass
@@ -326,6 +347,27 @@ def build_cfg(model_name_or_path: str) -> dict:
     }
 
 
+def build_freeform_cfg(model_name_or_path: str) -> dict:
+    """Config for freeform_sft: same pipeline as build_cfg but the assistant target
+    is plain text '<label>\\n<explanation>' (column 'target_text', derived at train
+    time from target_json) instead of the JSON rationale."""
+    from config.queries import Queries
+
+    cfg = build_cfg(model_name_or_path)
+    logistics = cfg["logistics"]
+    cfg["mode"] = "freeform_sft"
+    # Applied after build_cfg so a shell-exported WANDB_PROJECT cannot hijack the
+    # freeform project; FREEFORM_WANDB_PROJECT is the explicit override.
+    cfg["wandb"]["project"] = os.environ.get(
+        "FREEFORM_WANDB_PROJECT", logistics.wandb_freeform_project
+    )
+    cfg["wandb"]["tags"] = [*logistics.wandb_tags, "freeform"]
+    cfg["collator"]["target_key"] = "target_text"
+    cfg["collator"]["system_prompt"] = Queries().FREEFORM_SYSTEM_PROMPT
+    cfg["eval_parser"] = "freeform"
+    return cfg
+
+
 def build_dpo_cfg(model_name_or_path: str) -> dict:
     logistics = Logistics()
     logistics.wandb_tags.append(model_name_or_path)
@@ -337,6 +379,9 @@ def build_dpo_cfg(model_name_or_path: str) -> dict:
         "lora": LoRAParams(),
         "dpo": DPOParams(),
         "dpo_extras": DPOConfigExtras(),
+        # NOTE: paper uses lr ~1e-6 / beta 0.1 / 3 epochs; DPOParams keeps the
+        # existing lr 5e-6 / beta 0.1 / 2 epochs defaults.
+        "mdpo_loss": MDPOParams(),
         "mode": "mdpo",
         "model": {
             "base_model_name_or_path": model_name_or_path,

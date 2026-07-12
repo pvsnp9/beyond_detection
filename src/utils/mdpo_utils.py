@@ -245,44 +245,37 @@ def evaluate_mdpo(
             if chosen and rejected:
                 chosen_rejected_ratios.append(_length_ratio(chosen, rejected))
 
+        def _generate_batch(batch_examples: List[Dict[str, Any]]) -> None:
+            model_inputs = prompt_collator(batch_examples)
+            model_inputs = {
+                k: v.to(model.device) if torch.is_tensor(v) else v
+                for k, v in model_inputs.items()
+            }
+            # PEFT kbit prep leaves norm layers in fp32; generate() runs outside
+            # the trainer's autocast, so fp32 hidden states would hit the bf16
+            # lm_head. Mirror the trainer's mixed-precision context here.
+            with torch.autocast(device_type=model.device.type, dtype=torch.bfloat16):
+                generated = model.generate(
+                    **model_inputs,
+                    do_sample=False,
+                    temperature=0.0,
+                    top_p=1.0,
+                    max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
+                )
+            texts = processor.batch_decode(generated, skip_special_tokens=True)
+            for text, ex in zip(texts, batch_examples):
+                _process_example(text, ex)
+
         batch_examples: List[Dict[str, Any]] = []
         for example in eval_examples:
             batch_examples.append(example)
             if len(batch_examples) < batch_size:
                 continue
-            model_inputs = prompt_collator(batch_examples)
-            model_inputs = {
-                k: v.to(model.device) if torch.is_tensor(v) else v
-                for k, v in model_inputs.items()
-            }
-            generated = model.generate(
-                **model_inputs,
-                do_sample=False,
-                temperature=0.0,
-                top_p=1.0,
-                max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
-            )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
-            for text, ex in zip(texts, batch_examples):
-                _process_example(text, ex)
+            _generate_batch(batch_examples)
             batch_examples = []
 
         if batch_examples:
-            model_inputs = prompt_collator(batch_examples)
-            model_inputs = {
-                k: v.to(model.device) if torch.is_tensor(v) else v
-                for k, v in model_inputs.items()
-            }
-            generated = model.generate(
-                **model_inputs,
-                do_sample=False,
-                temperature=0.0,
-                top_p=1.0,
-                max_new_tokens=cfg.get("eval_decode", {}).get("max_new_tokens", 256),
-            )
-            texts = processor.batch_decode(generated, skip_special_tokens=True)
-            for text, ex in zip(texts, batch_examples):
-                _process_example(text, ex)
+            _generate_batch(batch_examples)
 
         metrics: Dict[str, Any] = {}
         metrics["eval/num_samples"] = total
@@ -307,96 +300,67 @@ def evaluate_mdpo(
             model.train()
 
 
-def load_sft_adapter_models(
+def load_merged_policy_model(
     model_key: str,
+    merged_dirname: str,
     cfg: Dict[str, Any],
     bnb_config: Any,
+    use_flash_attention: bool,
     device_map: str = "auto",
     trust_remote_code: bool = True,
     use_fast: bool = True,
-) -> Tuple[Any, Any, str, str]:
-    
-    models_dirs = {
-        "aya": "aya_vision_8b",
-        "llama": "llama32",
-        "gemma": "gemma3",
-        "qwen": "qwen3_vl_8b",
-    }
+) -> Tuple[Any, Any, str, Dict[str, Any]]:
+    """Load the SFT-merged base model 4-bit for mDPO.
 
-    result = get_sft_best_model(models_dirs.get(model_key))
-    checkpoint_path = result.get("best_model_path")
-    if not checkpoint_path:
-        raise FileNotFoundError(f"no SFT checkpoint found for {model_key}")
+    The merged model (see src/train/merge_sft_base.py) is both the policy
+    starting point and — with the fresh LoRA disabled — the DPO reference, so
+    the reference is exactly the SFT policy.
+    """
+    from config.logistics import MDPOParams
 
-    base_models = BaseModels()
-    base_model_id = base_models.models.get(model_key)
-    if not base_model_id:
-        raise ValueError(f"unknown model_key: {model_key}")
-    
-    print(f"[DPO] Loading processor from base model: {base_model_id}")
-    processor = AutoProcessor.from_pretrained(
-        base_model_id,
-        trust_remote_code=trust_remote_code,
-        use_fast=use_fast,
-    )
-    try:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            checkpoint_path,
-            trust_remote_code=trust_remote_code,
-            use_fast=use_fast,
+    merged_dir = os.path.join(MDPOParams().sft_merged_root, merged_dirname)
+    if not os.path.isdir(merged_dir):
+        raise FileNotFoundError(
+            f"merged SFT model not found at {merged_dir}; "
+            f"run `python -m src.train.merge_sft_base {model_key}` first "
+            "(or sbatch src/slurm/merge_sft.slurm)"
         )
-        if getattr(processor, "tokenizer", None) is not None:
-            processor.tokenizer = tokenizer
-            print(f"[DPO] Attached tokenizer from: {checkpoint_path}")
-        else:
-            print("[DPO] Processor has no tokenizer attribute; using base tokenizer.")
-    except Exception as exc:
-        print(f"[DPO] Failed to load tokenizer from checkpoint; using base processor: {exc}")
-    
-    
+    merge_meta: Dict[str, Any] = {}
+    meta_path = os.path.join(merged_dir, "merge_meta.json")
+    if os.path.isfile(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            merge_meta = json.load(handle)
+
+    print(f"[mDPO] Loading merged SFT model: {merged_dir}")
+    processor = AutoProcessor.from_pretrained(
+        merged_dir, trust_remote_code=trust_remote_code, use_fast=use_fast
+    )
+
+    from src.inference.run_inference import BaseModels
+
+    model_class = BaseModels().get_class(model_key)
     model_kwargs = dict(
         dtype=_dtype_from_str(cfg["model"]["torch_dtype"]),
         device_map=device_map,
         trust_remote_code=trust_remote_code,
         quantization_config=bnb_config,
     )
-
-    model_class = base_models.get_class(model_key)
-    print(f"[DPO] Loading base model: {base_model_id}")
-    
-    if cfg["model"]["use_flash_attention"] and cfg["dpo_extras"].use_flash_attention_2:
+    if use_flash_attention:
         try:
-            policy_model = model_class.from_pretrained(
-                base_model_id, attn_implementation="flash_attention_2", **model_kwargs
+            model = model_class.from_pretrained(
+                merged_dir, attn_implementation="flash_attention_2", **model_kwargs
             )
         except Exception as exc:
             print(f"FlashAttention-2 unavailable, loading default attention: {exc}")
-            policy_model = model_class.from_pretrained(base_model_id, **model_kwargs)
+            model = model_class.from_pretrained(merged_dir, **model_kwargs)
     else:
-        policy_model = model_class.from_pretrained(base_model_id, **model_kwargs)
-    
+        model = model_class.from_pretrained(merged_dir, **model_kwargs)
 
-    # Enable gradient checkpointing from DPOConfigExtras
-    if cfg["dpo_extras"].gradient_checkpointing:
-        policy_model.gradient_checkpointing_enable()
+    # NOTE: no prepare_model_for_kbit_training / adapter attach here — the
+    # trainer receives a fresh LoRA via peft_config and TRL handles kbit prep.
+    return model, processor, merged_dir, merge_meta
 
-    policy_model = prepare_model_for_kbit_training(policy_model)
 
-    print(f"[DPO] Attaching SFT adapter from: {checkpoint_path}")
-    policy_model = PeftModel.from_pretrained(
-        policy_model, 
-        checkpoint_path, 
-        is_trainable=True
-    )
-
-    print("\n" + "="*40)
-    print("TRAINABLE PARAMETERS STATUS:")
-    policy_model.print_trainable_parameters()
-    print("="*40 + "\n")
-
-    return policy_model, processor, checkpoint_path, base_model_id
 
 
 
@@ -410,7 +374,7 @@ __all__ = [
     "_select_subset",
     "build_dpo_config",
     "evaluate_mdpo",
-    "load_sft_adapter_models",
+    "load_merged_policy_model",
     "MDPOMetricsCallback",
     "MDPOTrainMetricsCallback",
     "MDPOStepEvalCallback",
@@ -434,13 +398,18 @@ class MDPOMetricsCallback(TrainerCallback):
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         model = kwargs.get("model", self.model)
-        extra = evaluate_mdpo(
-            model,
-            self.processor,
-            self.eval_dataset,
-            self.prompt_collator,
-            self.cfg,
-        )
+        try:
+            extra = evaluate_mdpo(
+                model,
+                self.processor,
+                self.eval_dataset,
+                self.prompt_collator,
+                self.cfg,
+            )
+        except Exception as exc:
+            # diagnostics must never kill a training run
+            print(f"[MDPOMetricsCallback] generation eval failed (skipped): {exc}")
+            return control
         if metrics is not None:
             metrics.update(extra)
         return control
@@ -487,13 +456,18 @@ class MDPOStepEvalCallback(TrainerCallback):
         if state.global_step % self.step_interval != 0:
             return control
         model = kwargs.get("model", self.model)
-        metrics = evaluate_mdpo(
-            model,
-            self.processor,
-            self.eval_dataset,
-            self.prompt_collator,
-            self.cfg,
-        )
+        try:
+            metrics = evaluate_mdpo(
+                model,
+                self.processor,
+                self.eval_dataset,
+                self.prompt_collator,
+                self.cfg,
+            )
+        except Exception as exc:
+            # diagnostics must never kill a training run
+            print(f"[MDPOStepEvalCallback] generation eval failed (skipped): {exc}")
+            return control
         if self.run is not None:
             self.run.log(metrics)
         return control

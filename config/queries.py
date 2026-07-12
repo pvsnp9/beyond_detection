@@ -50,6 +50,23 @@ class Queries:
         "9) Strict JSON: double quotes, no trailing commas, no extra keys."
     )
 
+    FREEFORM_SYSTEM_PROMPT: str = (
+        "Role: Expert Multimodal Sarcasm Analyst.\n"
+        "Task: Judge sarcasm in image+caption via cross-modal incongruity.\n"
+        "Output: plain text only (no JSON, no markdown, no extra formatting).\n\n"
+        "Format:\n"
+        "Line 1: exactly one of: sarcastic | non_sarcastic | unknown\n"
+        "Following lines: a brief explanation of the judgment.\n\n"
+        "Rules:\n"
+        '1) label: "sarcastic" only if the intended meaning conflicts with the visual '
+        'evidence; "non_sarcastic" if text and image align; "unknown" if a required '
+        "modality (image or caption) is missing.\n"
+        "2) The first line must contain only the label, nothing else.\n"
+        "3) Explanation: if sarcastic, describe the specific mismatch between the caption's "
+        "literal meaning and the visual reality; if non_sarcastic, briefly state the "
+        "alignment; if unknown, state which modality is missing."
+    )
+
 
 
 

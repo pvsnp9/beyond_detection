@@ -8,6 +8,29 @@ from src.eval.classification import get_latest_result_files
 from transformers import AutoProcessor
 
 
+def score_pairs(
+    references: List[str],
+    candidates: List[str],
+    lang: str = "en",
+    verbose: bool = False,
+) -> Dict[str, float]:
+    if not references or not candidates:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    if len(references) != len(candidates):
+        raise ValueError(
+            f"references and candidates must be the same length, got {len(references)} vs {len(candidates)}"
+        )
+
+    from bert_score import score
+
+    precision, recall, f1 = score(candidates, references, lang=lang, verbose=verbose)
+    return {
+        "precision": float(precision.mean().item()),
+        "recall": float(recall.mean().item()),
+        "f1": float(f1.mean().item()),
+    }
+
+
 def compute_bert_metrics(process_explanation_only: bool = False):
     try:
         files = get_latest_result_files()

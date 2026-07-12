@@ -36,9 +36,9 @@ def _normalize_label(value: Any) -> Optional[str]:
         return "sarcastic"
     if text in {"2", "unknown", "unk", "uncertain", "cannot_determine", "cannot_determine_from_missing_modality"}:
         return "unknown"
-    if text in {"0", "false", "no", "n", "not_sarcastic", "nonsarcastic"}:
+    if text in {"0", "false", "no", "n", "not_sarcastic", "non_sarcastic", "nonsarcastic"}:
         return "not_sarcastic"
-    if "not sarcastic" in text or "non-sarcastic" in text:
+    if "not sarcastic" in text or "non-sarcastic" in text or "non_sarcastic" in text or "non sarcastic" in text:
         return "not_sarcastic"
     if "unknown" in text or "cannot determine" in text:
         return "unknown"
@@ -113,6 +113,27 @@ def _parse_prediction(text: str) -> Optional[str]:
         except Exception:
             pass
     return _normalize_label(raw)
+
+
+def _parse_freeform_prediction(text: str) -> Optional[str]:
+    """Parse freeform_sft output: first line is the label, rest is the explanation.
+    Falls back to the JSON-first parser if the first line is not a label."""
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return None
+    first_line = raw.splitlines()[0].strip().strip("\"'`*#.:").lower()
+    label = _normalize_label(first_line)
+    if label is not None:
+        return label
+    return _parse_prediction(raw)
+
+
+def _resolve_pred_parser(cfg: Any):
+    if _cfg_get(cfg, "eval_parser") == "freeform":
+        return _parse_freeform_prediction
+    return _parse_prediction
 
 
 def _build_metrics(preds: Iterable[str], golds: Iterable[str]) -> Dict[str, Any]:
@@ -195,6 +216,7 @@ def evaluate_llama(
     collator: Any,
     cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
+    parse = _resolve_pred_parser(cfg)
     decode_cfg = cfg.get("eval_decode", {})
     dataset_cfg = cfg.get("dataset", {})
     sft_cfg = cfg.get("sft", {})
@@ -240,7 +262,7 @@ def evaluate_llama(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text in texts:
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
             for example in eval_dataset:
                 golds.append(_extract_gold(example) or "unknown")
         else:
@@ -271,7 +293,7 @@ def evaluate_llama(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text, ex in zip(texts, batch_examples):
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
                     golds.append(_extract_gold(ex) or "unknown")
                 batch_examples = []
 
@@ -294,7 +316,7 @@ def evaluate_llama(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text, ex in zip(texts, batch_examples):
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
                     golds.append(_extract_gold(ex) or "unknown")
 
         return _build_metrics(preds, golds)
@@ -313,6 +335,7 @@ def evaluate_gemma(
     collator: Any,
     cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
+    parse = _resolve_pred_parser(cfg)
     decode_cfg = cfg.get("eval_decode", {})
     dataset_cfg = cfg.get("dataset", {})
     sft_cfg = cfg.get("sft", {})
@@ -361,7 +384,7 @@ def evaluate_gemma(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text in texts:
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
             for example in eval_dataset:
                 golds.append(_extract_gold(example) or "unknown")
         else:
@@ -394,7 +417,7 @@ def evaluate_gemma(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text, ex in zip(texts, batch_examples):
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
                     golds.append(_extract_gold(ex) or "unknown")
                 batch_examples = []
 
@@ -419,7 +442,7 @@ def evaluate_gemma(
                 ]
                 texts = processor.batch_decode(generated_trimmed, skip_special_tokens=True)
                 for text, ex in zip(texts, batch_examples):
-                    preds.append(_parse_prediction(text) or "failed")
+                    preds.append(parse(text) or "failed")
                     golds.append(_extract_gold(ex) or "unknown")
 
         return _build_metrics(preds, golds)
@@ -453,6 +476,7 @@ def evaluate_qwen3(
     try:
         try:
             eval_cfg = cfg.get("eval", {})
+            parse = _resolve_pred_parser(cfg)
             decode_cfg = cfg.get("eval_decode", {})
             dataset_cfg = cfg.get("dataset", {})
             sft_cfg = cfg.get("sft", {})
@@ -502,7 +526,7 @@ def evaluate_qwen3(
                         clean_up_tokenization_spaces=False,
                     )
                     for text in texts:
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                 for example in eval_dataset:
                     golds.append(_extract_gold(example) or "unknown")
             else:
@@ -538,7 +562,7 @@ def evaluate_qwen3(
                         clean_up_tokenization_spaces=False,
                     )
                     for text, ex in zip(texts, batch_examples):
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                         golds.append(_extract_gold(ex) or "unknown")
                     batch_examples = []
 
@@ -566,7 +590,7 @@ def evaluate_qwen3(
                         clean_up_tokenization_spaces=False,
                     )
                     for text, ex in zip(texts, batch_examples):
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                         golds.append(_extract_gold(ex) or "unknown")
 
             return _build_metrics(preds, golds)
@@ -590,7 +614,7 @@ def evaluate_aya(
 ) -> Dict[str, Any]:
     was_training = model.training
 
-    rev_use_cache = model.config.use_cache
+    prev_use_cache = model.config.use_cache
     prev_padding_side = processor.tokenizer.padding_side
 
     model.eval()
@@ -599,6 +623,7 @@ def evaluate_aya(
     try:
         try:
             eval_cfg = cfg.get("eval", {})
+            parse = _resolve_pred_parser(cfg)
             decode_cfg = cfg.get("eval_decode", {})
             dataset_cfg = cfg.get("dataset", {})
             sft_cfg = cfg.get("sft", {})
@@ -669,7 +694,7 @@ def evaluate_aya(
                     new_tokens = [row[prompt_len:] for row in generated]
                     texts = processor.batch_decode(new_tokens, skip_special_tokens=True)
                     for text in texts:
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                 for example in eval_dataset:
                     golds.append(_extract_gold(example) or "unknown")
             else:
@@ -701,7 +726,7 @@ def evaluate_aya(
                     new_tokens = [row[prompt_len:] for row in generated]
                     texts = processor.batch_decode(new_tokens, skip_special_tokens=True)
                     for text, ex in zip(texts, batch_examples):
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                         golds.append(_extract_gold(ex) or "unknown")
                     batch_examples = []
 
@@ -725,7 +750,7 @@ def evaluate_aya(
                     new_tokens = [row[prompt_len:] for row in generated]
                     texts = processor.batch_decode(new_tokens, skip_special_tokens=True)
                     for text, ex in zip(texts, batch_examples):
-                        preds.append(_parse_prediction(text) or "failed")
+                        preds.append(parse(text) or "failed")
                         golds.append(_extract_gold(ex) or "unknown")
 
             return _build_metrics(preds, golds)

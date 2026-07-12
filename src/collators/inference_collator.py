@@ -18,6 +18,7 @@ def aya_inference_collator(
     model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
+    system_prompt: Optional[str] = None,
 ):
     try:
         mode = (mode or "both").strip().lower()
@@ -74,7 +75,7 @@ def aya_inference_collator(
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": Queries().SYSTEM_PROMPT}],
+                    "content": [{"type": "text", "text": system_prompt or Queries().SYSTEM_PROMPT}],
                 },
                 {"role": "user", "content": content},
             ]
@@ -111,6 +112,7 @@ def qwen_inference_collator(
     model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
+    system_prompt: Optional[str] = None,
 ):
     try:
         mode = (mode or "both").strip().lower()
@@ -153,13 +155,15 @@ def qwen_inference_collator(
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
             else:
-                user_content = [{"type": "image"}]
-                user_content.append({"type": "text", "text": "" if mode == "image" else user_text})
+                user_content = [
+                    {"type": "image"},
+                    {"type": "text", "text": user_text},
+                ]
 
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": Queries().SYSTEM_PROMPT}],
+                    "content": [{"type": "text", "text": system_prompt or Queries().SYSTEM_PROMPT}],
                 },
                 {"role": "user", "content": user_content},
             ]
@@ -200,6 +204,7 @@ def llama_inference_collator(
     model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
+    system_prompt: Optional[str] = None,
 ):
     try:
         mode = (mode or "both").strip().lower()
@@ -242,13 +247,15 @@ def llama_inference_collator(
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
             else:
-                user_content = [{"type": "image"}]
-                user_content.append({"type": "text", "text": "" if mode == "image" else user_text})
+                user_content = [
+                    {"type": "image"},
+                    {"type": "text", "text": user_text},
+                ]
 
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": Queries().SYSTEM_PROMPT}],
+                    "content": [{"type": "text", "text": system_prompt or Queries().SYSTEM_PROMPT}],
                 },
                 {"role": "user", "content": user_content},
             ]
@@ -269,7 +276,9 @@ def llama_inference_collator(
             "text": text_inputs,
             "return_tensors": "pt",
             "padding": True,
-            "truncation": True,
+            # Llama-3.2-Vision expands image placeholders into many tokens;
+            # truncation can clip mid-block and cause token/embedding mismatch.
+            "truncation": False,
         }
         if max_length is not None:
             processor_kwargs["max_length"] = max_length
@@ -288,6 +297,7 @@ def gemma_inference_collator(
     model_type: str = "sft",
     processor=None,
     max_length: Optional[int] = None,
+    system_prompt: Optional[str] = None,
 ):
     try:
         mode = (mode or "both").strip().lower()
@@ -330,13 +340,15 @@ def gemma_inference_collator(
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
             else:
-                user_content = [{"type": "image"}]
-                user_content.append({"type": "text", "text": "" if mode == "image" else user_text})
+                user_content = [
+                    {"type": "image"},
+                    {"type": "text", "text": user_text},
+                ]
 
             messages = [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": Queries().SYSTEM_PROMPT}],
+                    "content": [{"type": "text", "text": system_prompt or Queries().SYSTEM_PROMPT}],
                 },
                 {"role": "user", "content": user_content},
             ]
@@ -357,7 +369,9 @@ def gemma_inference_collator(
             "text": text_inputs,
             "return_tensors": "pt",
             "padding": True,
-            "truncation": True,
+            # Gemma3 expands a single image placeholder into many soft-image tokens.
+            # Truncation can clip mid-block and cause image-token/embedding count mismatch.
+            "truncation": False,
         }
         if max_length is not None:
             processor_kwargs["max_length"] = max_length

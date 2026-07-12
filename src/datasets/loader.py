@@ -1,5 +1,6 @@
 """HF dataset loader helpers."""
 
+import json
 from math import floor
 from typing import Optional, Union
 
@@ -38,6 +39,37 @@ def load_hf_dataset(
     return dataset
 
 
+FREEFORM_LABELS = ("sarcastic", "non_sarcastic", "unknown")
+
+
+def _derive_freeform_target(target_json: str) -> dict:
+    """Map a target_json row to a plain-text target '<label>\\n<explanation>'."""
+    label, explanation = "unknown", ""
+    try:
+        payload = json.loads(target_json) if isinstance(target_json, str) else target_json
+        if isinstance(payload, dict):
+            raw_label = str(payload.get("label") or "").strip().lower()
+            if raw_label in FREEFORM_LABELS:
+                label = raw_label
+            explanation = str(payload.get("explanation") or "").strip()
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {"target_text": f"{label}\n{explanation}".strip()}
+
+
+def add_freeform_target(dataset: DatasetLike, target_json_key: str = "target_json") -> DatasetLike:
+    """Add a 'target_text' column for freeform_sft, derived from target_json.
+
+    input_columns restricts the map to the target_json column, so image bytes
+    are never decoded.
+    """
+    return dataset.map(
+        _derive_freeform_target,
+        input_columns=[target_json_key],
+        desc="derive freeform target",
+    )
+
+
 def load_hf_dpo_dataset(
     *,
     split: Optional[str] = "train",
@@ -66,7 +98,7 @@ def load_dpo_train_eval_dataset(
     download_mode: Optional[str] = None,
     eval_size: int = 48,
     format_data: bool = False,
-    allowed_modalities: Optional[tuple[str, ...]] = ("both",),
+    allowed_modalities: Optional[tuple[str, ...]] = None,
 ) -> DatasetDict:
     """Load DPO train dataset, optionally filter modalities, derive eval split, and map if requested."""
     if format_data and processor is None:

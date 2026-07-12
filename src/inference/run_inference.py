@@ -2,12 +2,13 @@ import json
 from datetime import datetime
 import torch
 from transformers import (
-    AutoProcessor, 
+    AutoProcessor,
     MllamaForConditionalGeneration,      # Llama 3.2
     AyaVisionForConditionalGeneration,   # Aya
     Gemma3ForConditionalGeneration,      # Gemma 3
     AutoModelForImageTextToText           # Generic Fallback
 )
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 import os
 import time
 from PIL import Image
@@ -24,9 +25,27 @@ from tqdm import tqdm
 from src.utils.sft_utils import get_sft_result_dir
 
 
+class SafeRepetitionPenaltyLogitsProcessor(LogitsProcessor):
+    # Mllama puts <|image|> at id 128256 while text_config.vocab_size is also 128256,
+    # so the default RepetitionPenaltyLogitsProcessor's gather/scatter indexes past
+    # lm_head and triggers a CUDA index-out-of-bounds assert. Clamp ids to the lm_head
+    # range before applying the penalty; the legitimate last-vocab token absorbs the
+    # spurious update, which is harmless for generation.
+    def __init__(self, penalty: float):
+        self.penalty = float(penalty)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        vocab_size = scores.shape[-1]
+        safe_ids = input_ids.clamp(max=vocab_size - 1)
+        score = torch.gather(scores, 1, safe_ids)
+        score = torch.where(score < 0, score * self.penalty, score / self.penalty)
+        scores.scatter_(1, safe_ids, score)
+        return scores
+
+
 VALID_MODALITIES = {"both", "text", "image"}
 VALID_MODEL_TYPES = {"sft", "mdpo"}
-MDPO_MODEL_KEYS = {"llama", "qwen"}
+MDPO_MODEL_KEYS = {"llama", "qwen", "gemma"}
 
 MODEL_DIR_CANDIDATES = {
     "sft": {
@@ -38,6 +57,7 @@ MODEL_DIR_CANDIDATES = {
     "mdpo": {
         "llama": ["llama32"],
         "qwen": ["qwen3", "qwen3_vl_8b"],
+        "gemma": ["gemma3"],
     },
 }
 
@@ -219,6 +239,27 @@ def _load_processor_for_inference(base_model_id: str, checkpoint_path: str = Non
     )
 
 
+def _resolve_adapter_lineage(checkpoint_path: str) -> dict:
+    """Read training_meta.json next to (or above) an adapter checkpoint.
+
+    New-pipeline mDPO adapters are fresh LoRAs trained on an SFT-merged base
+    (adapter_style == "fresh_lora_on_merged_sft"); applying them to the raw HF
+    base would silently drop the SFT weights.
+    """
+    if not checkpoint_path:
+        return {}
+    for candidate_dir in (checkpoint_path, os.path.dirname(checkpoint_path)):
+        meta_path = os.path.join(candidate_dir, "training_meta.json")
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as handle:
+                    return json.load(handle)
+            except Exception as exc:
+                print(f"Failed to read {meta_path}: {exc}")
+                return {}
+    return {}
+
+
 def _load_model_for_inference(
     model_class,
     base_model_id: str,
@@ -226,6 +267,26 @@ def _load_model_for_inference(
     merge_adapter: bool = True,
 ):
     if checkpoint_path:
+        chain_sft_checkpoint = None
+        lineage = _resolve_adapter_lineage(checkpoint_path)
+        if lineage.get("adapter_style") == "fresh_lora_on_merged_sft":
+            merged_base_path = lineage.get("merged_base_path")
+            if merged_base_path and os.path.isdir(merged_base_path):
+                print(f"Loading SFT-merged base for mDPO adapter: {merged_base_path}")
+                base_model_id = merged_base_path
+            elif lineage.get("sft_adapter_checkpoint"):
+                # merged dir gone: rebuild it by chaining base -> SFT adapter -> merge
+                chain_sft_checkpoint = lineage["sft_adapter_checkpoint"]
+                print(
+                    "Merged base missing; chaining SFT adapter before mDPO adapter: "
+                    f"{chain_sft_checkpoint}"
+                )
+            else:
+                raise RuntimeError(
+                    f"mDPO adapter at {checkpoint_path} requires its SFT-merged base, but "
+                    "neither merged_base_path nor sft_adapter_checkpoint is available"
+                )
+
         try:
             model = model_class.from_pretrained(
                 base_model_id,
@@ -237,6 +298,15 @@ def _load_model_for_inference(
             raise RuntimeError(
                 f"Failed to load base model for checkpoint mode (base={base_model_id}): {exc}"
             ) from exc
+
+        if chain_sft_checkpoint:
+            try:
+                model = PeftModel.from_pretrained(model, chain_sft_checkpoint)
+                model = model.merge_and_unload()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to chain SFT adapter {chain_sft_checkpoint}: {exc}"
+                ) from exc
 
         try:
             print(f"Loading Adapter: {checkpoint_path}")
@@ -276,7 +346,9 @@ def generate_batch(
         generation_kwargs = {
             "max_new_tokens": max_tokens,
             "do_sample": False,
-            "repetition_penalty": 1.05,
+            "logits_processor": LogitsProcessorList(
+                [SafeRepetitionPenaltyLogitsProcessor(1.05)]
+            ),
         }
         with torch.no_grad():
             output_ids = model.generate(
@@ -579,6 +651,10 @@ def run_vlm_generation(
         model.eval()
 
         results_dir = get_sft_result_dir(model_key)
+        timestamp_dir = _prepare_results_dir(results_dir)
+        task_dir = os.path.join(timestamp_dir, model_type, "default")
+        os.makedirs(task_dir, exist_ok=True)
+        results_path = os.path.join(task_dir, "all.jsonl")
         ds = get_test_data()
         task_outputs, run_stats = _run_generation_for_dataset(
             ds=ds,
@@ -591,6 +667,8 @@ def run_vlm_generation(
             results_dir=results_dir,
             task="all",
             include_perturbation_tpye=False,
+            results_path=results_path,
+            output_filename="all.jsonl",
         )
         print(
             "##########################\n"
@@ -643,7 +721,9 @@ def ood_generation(
         ]
 
         results_dir = get_sft_result_dir(model_key)
-        run_task_dir = _prepare_results_dir(results_dir)
+        timestamp_dir = _prepare_results_dir(results_dir)
+        run_task_dir = os.path.join(timestamp_dir, model_type, "ood")
+        os.makedirs(run_task_dir, exist_ok=True)
         split_outputs = {}
         aggregate_written_count = 0
         aggregate_failed_gen_count = 0
