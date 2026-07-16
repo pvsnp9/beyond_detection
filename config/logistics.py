@@ -45,7 +45,7 @@ class Logistics:
     seed: int = 42
     teacher_model: str = "gpt-5.2"
     langs: List[str] = field(default_factory=lambda: ["en", "zh"])
-    infer_bathc_size:int = 4
+    infer_batch_size:int = 4
     gen_max_token:int = 512
 
     hf_sft_ds_id: str = "alita9/beyond_sarcasm_detection_sft"
@@ -426,6 +426,15 @@ def build_dpo_cfg(model_name_or_path: str) -> dict:
             "max_new_tokens": 256,
         },
     }
+
+
+def build_std_dpo_cfg(model_name_or_path: str, variant: str = "dpo") -> dict:
+    # standard DPO: mDPO cfg with the conditional/anchor terms off; hparams identical
+    cfg = build_dpo_cfg(model_name_or_path)
+    cfg["mode"] = variant
+    cfg["mdpo_loss"] = MDPOParams(use_conditional=False, use_anchor=False)
+    cfg["wandb"]["tags"] = [*cfg["wandb"]["tags"], variant]
+    return cfg
 
 
 

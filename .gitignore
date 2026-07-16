@@ -18,3 +18,4 @@ outputs/
 !outputs/reports/**
 src/slurm/
 wandb/
+paper/

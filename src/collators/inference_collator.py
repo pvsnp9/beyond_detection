@@ -7,7 +7,7 @@ from config.queries import Queries
 
 def _resolve_query(example, model_type: str = "sft") -> str:
     mtype = str(model_type or "sft").strip().lower()
-    if mtype == "mdpo":
+    if mtype in {"mdpo", "dpo"}:
         return Queries().DPO_QUERY.strip()
     return (example.get("query") or "").strip()
 

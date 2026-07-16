@@ -11,7 +11,6 @@ from peft import PeftModel, prepare_model_for_kbit_training
 from transformers import AutoProcessor, TrainerCallback
 
 from src.hf.publish_lora_models import get_sft_best_model
-from src.inference.run_inference import BaseModels
 from src.utils.sft_utils import _count_trainable_params, _dtype_from_str, _get_world_size
 
 
@@ -336,9 +335,9 @@ def load_merged_policy_model(
         merged_dir, trust_remote_code=trust_remote_code, use_fast=use_fast
     )
 
-    from src.inference.run_inference import BaseModels
+    from src.inference.run_inference import _get_model_class
 
-    model_class = BaseModels().get_class(model_key)
+    model_class = _get_model_class(model_key)
     model_kwargs = dict(
         dtype=_dtype_from_str(cfg["model"]["torch_dtype"]),
         device_map=device_map,
