@@ -55,6 +55,7 @@ class Logistics:
     wandb_project: str = "sarcasm_sft"
     wandb_dpo_project: str ="sarcasm_dpo"
     wandb_freeform_project: str = "free_form_sft"
+    wandb_rich_freeform_project: str = "rich_freeform_sft"
     wandb_tags: List[str] = field(default_factory=lambda: ["sarcasm", "sft"])
     wandb_dpo_tags: List[str] = field(default_factory=lambda: ["sarcasm", "dpo"])
 
@@ -212,6 +213,8 @@ class DPOParams:
     max_completion_length: int = 512
     beta: float = 0.1
     loss_type: str = "sigmoid"
+    # NLL-on-chosen weight (RPO); None disables. Guards against preference collapse.
+    rpo_alpha: Optional[float] = None
     fp16: bool = False
     logging_steps: int = 5
     save_steps: int = 100
@@ -368,6 +371,24 @@ def build_freeform_cfg(model_name_or_path: str) -> dict:
     return cfg
 
 
+def build_rich_freeform_cfg(model_name_or_path: str) -> dict:
+    """Config for rich_freeform_sft: all 8 target_json fields rendered as
+    keyword-anchored plain text (column 'target_text_rich') in source order."""
+    from config.queries import Queries
+
+    cfg = build_freeform_cfg(model_name_or_path)
+    logistics = cfg["logistics"]
+    cfg["mode"] = "rich_freeform_sft"
+    cfg["wandb"]["project"] = os.environ.get(
+        "RICH_FREEFORM_WANDB_PROJECT", logistics.wandb_rich_freeform_project
+    )
+    cfg["wandb"]["tags"] = [*logistics.wandb_tags, "rich_freeform"]
+    cfg["collator"]["target_key"] = "target_text_rich"
+    cfg["collator"]["system_prompt"] = Queries().RICH_FREEFORM_SYSTEM_PROMPT
+    cfg["eval_parser"] = "rich_freeform"
+    return cfg
+
+
 def build_dpo_cfg(model_name_or_path: str) -> dict:
     logistics = Logistics()
     logistics.wandb_tags.append(model_name_or_path)
@@ -429,10 +450,13 @@ def build_dpo_cfg(model_name_or_path: str) -> dict:
 
 
 def build_std_dpo_cfg(model_name_or_path: str, variant: str = "dpo") -> dict:
-    # standard DPO: mDPO cfg with the conditional/anchor terms off; hparams identical
+    # standard DPO: mDPO cfg with the conditional/anchor terms off; hparams identical.
+    # rpo_alpha anchors the chosen likelihood — without it (and without mDPO's anchor
+    # term) DPO collapsed: chosen rewards -8 to -15, model unlearned its SFT outputs.
     cfg = build_dpo_cfg(model_name_or_path)
     cfg["mode"] = variant
     cfg["mdpo_loss"] = MDPOParams(use_conditional=False, use_anchor=False)
+    cfg["dpo"].rpo_alpha = 1.0
     cfg["wandb"]["tags"] = [*cfg["wandb"]["tags"], variant]
     return cfg
 
@@ -449,7 +473,6 @@ class Stats:
 
 @dataclass
 class HallEvalConfig:
-    logistics: Logistics = field(default_factory=Logistics)
     tau: float = 0.65
     tau_e: float = 0.62
     tau_c: float = 0.60
@@ -461,30 +484,6 @@ class HallEvalConfig:
     top_k: Optional[int] = None
     max_claims: int = 20
     min_clause_split_len: int = 120
-    skip_invalid: bool = False
-    seed: int = 42
-
-
-@dataclass
-class ParsedRecord:
-    id: str
-    model_key: Optional[str]
-    source: Optional[str]
-    modality: Optional[str]
-    quality_flags: Tuple[str, ...]
-    gt: Optional[str]
-    query: Optional[str]
-    ref_facts: List[str]
-    pred_facts: List[str]
-    explanation: str
-    ref_explanation: str = ""
-    ref_incongruity: str = ""
-    ref_text_literal: str = ""
-    need_explanation: Optional[bool] = None
-    missing_modalities_pred: Tuple[str, ...] = field(default_factory=tuple)
-    missing_modalities_ref: Tuple[str, ...] = field(default_factory=tuple)
-    is_valid: bool = True
-    error: Optional[str] = None
 
 
 @dataclass
@@ -498,19 +497,8 @@ class FactCounts:
 
 
 @dataclass
-class FactMetrics:
-    add: float
-    omit: float
-    p: float
-    r: float
-    f1: float
-
-
-@dataclass
 class ExplMetrics:
     eg: float
     eh: float
     ec: float
-    eqs: Optional[float]
     k_claims: int
-    len_tokens: int

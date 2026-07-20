@@ -45,12 +45,13 @@ COLLATORS = {
 }
 
 _SFT_DIRS = {"llama": "llama32", "gemma": "gemma3", "aya": "aya_vision_8b", "qwen": "qwen3_vl_8b"}
-_DPO_DIRS = {"llama": "llama32", "gemma": "gemma3", "qwen": "qwen3"}
+_DPO_DIRS = {"llama": "llama32", "gemma": "gemma3", "qwen": "qwen3", "aya": "aya"}
 
 # query="dpo" -> record/prompt query is Queries().DPO_QUERY, else the dataset query
 GENERATION_TYPES = {
     "sft": {"dirs": _SFT_DIRS, "system_prompt": "SYSTEM_PROMPT", "query": "dataset"},
     "freeform_sft": {"dirs": _SFT_DIRS, "system_prompt": "FREEFORM_SYSTEM_PROMPT", "query": "dataset"},
+    "rich_freeform_sft": {"dirs": _SFT_DIRS, "system_prompt": "RICH_FREEFORM_SYSTEM_PROMPT", "query": "dataset"},
     "mdpo": {"dirs": _DPO_DIRS, "system_prompt": "SYSTEM_PROMPT", "query": "dpo"},
     "dpo": {"dirs": _DPO_DIRS, "system_prompt": "SYSTEM_PROMPT", "query": "dpo"},
     "dpo_random": {"dirs": _DPO_DIRS, "system_prompt": "SYSTEM_PROMPT", "query": "dpo"},
@@ -351,7 +352,7 @@ def main(gen_type: str, model_key: str):
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise SystemExit(
-            "Usage: python -m src.inference.run_inference <sft|freeform_sft|mdpo|dpo> <llama|gemma|qwen|aya>"
+            "Usage: python -m src.inference.run_inference <sft|freeform_sft|rich_freeform_sft|mdpo|dpo|dpo_random> <llama|gemma|qwen|aya>"
         )
     gen_type = sys.argv[1].strip().lower()
     model_key = sys.argv[2].strip().lower()

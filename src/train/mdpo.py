@@ -1,6 +1,6 @@
 """Unified mDPO training entrypoint.
 
-Usage: python -m src.train.mdpo <qwen|gemma|llama>
+Usage: python -m src.train.mdpo <qwen|gemma|llama|aya>
 
 Trains a FRESH LoRA adapter (true mDPO objective, see src/train/mdpo_trainer.py)
 on top of the SFT-merged base produced by src/train/merge_sft_base.py.
@@ -24,6 +24,7 @@ from transformers import BitsAndBytesConfig, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
 from config.logistics import ModelCards, build_dpo_cfg
+from src.collators.ayacollator import AyaVisionSFTCollator
 from src.collators.gemma3_collator import Gemma3VisionSFTCollator
 from src.collators.llama32_collator import Llama32VisionSFTCollator
 from src.collators.qwen3_collator import Qwen3VisionSFTCollator
@@ -86,6 +87,19 @@ def _build_llama_eval_collator(processor: Any, cfg: dict) -> Any:
     )
 
 
+def _build_aya_eval_collator(processor: Any, cfg: dict) -> Any:
+    return AyaVisionSFTCollator(
+        processor=processor,
+        training=False,
+        max_length=cfg["dpo"].max_length,
+        image_key=cfg["collator"]["image_key"],
+        query_key=cfg["collator"]["prompt_key"],
+        caption_key=cfg["collator"]["caption_key"],
+        target_key="chosen",
+        system_prompt=cfg["collator"]["system_prompt"],
+    )
+
+
 MDPO_MODELS = {
     "qwen": MDPOModelSpec(
         model_card=ModelCards().qwen3_vl_8b_instruct,
@@ -113,6 +127,15 @@ MDPO_MODELS = {
         # tower, whose ~6.4k-token/image unchckpointed activations OOM an 80GB
         # A100 under mDPO's two live grad forwards. Vision stays frozen.
         lora_target_modules=r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)",
+    ),
+    "aya": MDPOModelSpec(
+        # AyaVision FA2 is untested in this build; SigLIP tower + 364px single
+        # tile keeps activations small, so eager attention is affordable
+        model_card=ModelCards().aya_model_name,
+        merged_dirname="aya_vision_8b",
+        adapter_dirname="aya",
+        flash_attn=False,
+        build_eval_collator=_build_aya_eval_collator,
     ),
 }
 

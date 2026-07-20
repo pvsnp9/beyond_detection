@@ -130,8 +130,27 @@ def _parse_freeform_prediction(text: str) -> Optional[str]:
     return _parse_prediction(raw)
 
 
+def _parse_rich_freeform_prediction(text: str) -> Optional[str]:
+    """Parse rich_freeform_sft output: label lives on a '^LABEL: ...' line.
+    Falls back to the freeform parser (which itself falls back to JSON)."""
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return None
+    m = re.search(r"^LABEL:\s*(.+)$", raw, re.MULTILINE)
+    if m:
+        label = _normalize_label(m.group(1).strip().strip("\"'`*").lower())
+        if label is not None:
+            return label
+    return _parse_freeform_prediction(raw)
+
+
 def _resolve_pred_parser(cfg: Any):
-    if _cfg_get(cfg, "eval_parser") == "freeform":
+    parser_key = _cfg_get(cfg, "eval_parser")
+    if parser_key == "rich_freeform":
+        return _parse_rich_freeform_prediction
+    if parser_key == "freeform":
         return _parse_freeform_prediction
     return _parse_prediction
 

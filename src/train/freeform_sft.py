@@ -42,12 +42,17 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from trl import SFTConfig, SFTTrainer
 
-from config.logistics import ModelCards, build_freeform_cfg
+from config.logistics import ModelCards, build_freeform_cfg, build_rich_freeform_cfg
 from src.collators.ayacollator import AyaVisionSFTCollator
 from src.collators.gemma3_collator import Gemma3VisionSFTCollator
 from src.collators.llama32_collator import Llama32VisionSFTCollator
 from src.collators.qwen3_collator import Qwen3VisionSFTCollator
-from src.datasets.loader import FREEFORM_LABELS, add_freeform_target, load_hf_dataset
+from src.datasets.loader import (
+    FREEFORM_LABELS,
+    add_freeform_target,
+    add_rich_freeform_target,
+    load_hf_dataset,
+)
 from src.utils.env import resolve_tokens_and_env, set_runtime_env
 from src.utils.eval_sarcasm import (
     evaluate_aya,
@@ -291,7 +296,7 @@ def _build_sft_config(cfg: dict, run, run_name: str, adapter_output_dir: str) ->
     return SFTConfig(**supported)
 
 
-def _sanity_check_batch(train_dataset, train_collator, processor, batch_size: int) -> None:
+def _sanity_check_batch(train_dataset, train_collator, processor, batch_size: int, rich: bool = False) -> None:
     batch = next(iter(DataLoader(train_dataset, batch_size=batch_size, collate_fn=train_collator)))
     supervised = (batch["labels"] != -100)
     print("supervised tokens per row:", supervised.sum(dim=1))
@@ -304,10 +309,19 @@ def _sanity_check_batch(train_dataset, train_collator, processor, batch_size: in
     # special) tokens and survive skip_special_tokens; strip them before checking.
     decoded = re.sub(r"<\|[^|]+\|>", "", decoded).strip()
     first_line = decoded.splitlines()[0].strip() if decoded else ""
-    assert first_line in FREEFORM_LABELS, (
-        f"Supervised span does not start with a freeform label; got {first_line!r} "
-        f"(decoded: {decoded[:120]!r})"
-    )
+    if rich:
+        assert first_line.startswith("NEED_EXPLANATION:"), (
+            f"Rich supervised span does not start with NEED_EXPLANATION:; got {first_line!r}"
+        )
+        # a valid LABEL line must survive — catches max_length truncation of the tail
+        assert re.search(r"^LABEL: (sarcastic|non_sarcastic|unknown)$", decoded, re.MULTILINE), (
+            f"Rich supervised span has no valid LABEL line (truncated?): {decoded[-160:]!r}"
+        )
+    else:
+        assert first_line in FREEFORM_LABELS, (
+            f"Supervised span does not start with a freeform label; got {first_line!r} "
+            f"(decoded: {decoded[:120]!r})"
+        )
     print(f"freeform target check OK, first line: {first_line!r}")
 
 
@@ -317,12 +331,14 @@ def _sanity_check_batch(train_dataset, train_collator, processor, batch_size: in
 
 def main() -> None:
     model_key = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
-    if model_key not in FREEFORM_MODELS:
-        raise SystemExit(f"usage: python -m src.train.freeform_sft <{'|'.join(FREEFORM_MODELS)}>")
+    variant = (sys.argv[2] if len(sys.argv) > 2 else "").strip().lower()
+    if model_key not in FREEFORM_MODELS or variant not in ("", "rich"):
+        raise SystemExit(f"usage: python -m src.train.freeform_sft <{'|'.join(FREEFORM_MODELS)}> [rich]")
+    rich = variant == "rich"
     spec = FREEFORM_MODELS[model_key]
 
     try:
-        cfg = build_freeform_cfg(spec.model_card)
+        cfg = build_rich_freeform_cfg(spec.model_card) if rich else build_freeform_cfg(spec.model_card)
         # Map results stay in process-private temp files: concurrent jobs racing
         # on the same shared cache file caused SIGBUS (same pattern as mdpo.py).
         disable_caching()
@@ -357,17 +373,22 @@ def main() -> None:
                 print(f"Hugging Face login skipped: {exc}")
 
         run_name = cfg["output"]["run_name"] or datetime.now().strftime(
-            f"freeform-{model_key}-%Y%m%d-%H%M%S"
+            f"{'rich-' if rich else ''}freeform-{model_key}-%Y%m%d-%H%M%S"
         )
+        if rich and cfg["output"]["run_name"]:
+            run_name = f"rich-{run_name}"
         run = init_wandb(cfg["wandb"], run_name)
 
+        # dir name must equal the gen_type: run_inference resolves adapters at
+        # outputs/models/<gen_type>/<model_dir>
         adapter_output_dir = cfg["output"]["adapter_output_dir"] or os.path.join(
-            cfg["sft"].model_dir, "freeform_sft", spec.output_dirname
+            cfg["sft"].model_dir, cfg["mode"], spec.output_dirname
         )
         os.makedirs(adapter_output_dir, exist_ok=True)
         os.makedirs(cfg["logistics"].sft_log_dir, exist_ok=True)
 
-        # --- data (target_text derived from target_json on both splits) ---
+        # --- data (plain-text target derived from target_json on both splits) ---
+        derive_target = add_rich_freeform_target if rich else add_freeform_target
         train_dataset = load_hf_dataset(
             cfg["dataset"]["dataset_id"],
             split=cfg["dataset"]["train_split"],
@@ -375,11 +396,11 @@ def main() -> None:
             streaming=cfg["dataset"]["streaming"],
             cache_dir=cfg["logistics"].hf_cache_dir,
         )
-        train_dataset = add_freeform_target(train_dataset)
+        train_dataset = derive_target(train_dataset)
         train_dataset = _select_subset(train_dataset, cfg["dataset"]["max_train_samples"])
 
         eval_dataset, eval_split = _load_eval_dataset(cfg)
-        eval_dataset = add_freeform_target(eval_dataset)
+        eval_dataset = derive_target(eval_dataset)
         eval_dataset = _select_subset(eval_dataset, cfg["dataset"]["max_eval_samples"])
 
         torch.backends.cuda.matmul.allow_tf32 = cfg["sft_extras"].tf32
@@ -449,7 +470,7 @@ def main() -> None:
         train_collator = spec.collator_cls(training=True, **collator_kwargs)
         eval_collator = spec.collator_cls(training=False, **collator_kwargs)
 
-        _sanity_check_batch(train_dataset, train_collator, processor, cfg["sft"].batch_size)
+        _sanity_check_batch(train_dataset, train_collator, processor, cfg["sft"].batch_size, rich=rich)
 
         sft_args = _build_sft_config(cfg, run, run_name, adapter_output_dir)
 
@@ -476,15 +497,15 @@ def main() -> None:
 
         sp = cfg["sft"]
         training_meta = {
-            "mode": "freeform_sft",
-            "target_format": "label\\nexplanation",
+            "mode": cfg["mode"],
+            "target_format": "keyword_sections_v1" if rich else "label\\nexplanation",
             "base_model_name_or_path": model_name_or_path,
             "dataset_id": cfg["dataset"]["dataset_id"],
             "lang": cfg["dataset"]["lang"],
             "effective_batch_size": sp.batch_size * sp.gradient_accumulation_steps * _get_world_size(),
             "flash_attention_enabled": cfg["model"]["use_flash_attention"]
             and cfg["sft_extras"].use_flash_attention_2,
-            "config_source": "config/logistics.py:build_freeform_cfg",
+            "config_source": f"config/logistics.py:build_{'rich_' if rich else ''}freeform_cfg",
             "timestamp": datetime.now().isoformat(),
         }
         with open(os.path.join(adapter_output_dir, "training_meta.json"), "w") as f:
@@ -496,7 +517,7 @@ def main() -> None:
             raise FileNotFoundError("adapter_model weights missing in adapter output dir")
 
         meta = {
-            "mode": "freeform_sft",
+            "mode": cfg["mode"],
             "dataset_id": cfg["dataset"]["dataset_id"],
             "dataset_lang": cfg["dataset"]["lang"],
             "eval_split": eval_split,

@@ -1,6 +1,6 @@
 """One-time prep for mDPO: merge each SFT LoRA adapter into its bf16 base model.
 
-Usage: python -m src.train.merge_sft_base <qwen|gemma|llama|all>
+Usage: python -m src.train.merge_sft_base <qwen|gemma|llama|aya|all>
 
 The merged models are the policy/reference starting point for mDPO: training
 loads them 4-bit and attaches a fresh LoRA, so the DPO reference (adapter
@@ -19,13 +19,14 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from config.logistics import MDPOParams
 from src.hf.publish_lora_models import get_sft_best_model
-from src.inference.run_inference import BaseModels
+from src.inference.run_inference import BASE_MODELS, _get_model_class
 
 # model_key -> (sft dir under outputs/models/sft, merged dir under sft_merged_root)
 MERGE_DIRS = {
     "qwen": ("qwen3_vl_8b", "qwen3_vl_8b"),
     "gemma": ("gemma3", "gemma3"),
     "llama": ("llama32", "llama32"),
+    "aya": ("aya_vision_8b", "aya_vision_8b"),
 }
 
 
@@ -41,9 +42,8 @@ def merge_sft_into_base(model_key: str, out_root: str | None = None) -> str:
     if not sft_checkpoint:
         raise FileNotFoundError(f"no SFT checkpoint found for {model_key} ({sft_dirname})")
 
-    base_models = BaseModels()
-    base_model_id = base_models.models[model_key]
-    model_class = base_models.get_class(model_key)
+    base_model_id = BASE_MODELS[model_key]
+    model_class = _get_model_class(model_key)
 
     print(f"[merge] {model_key}: base={base_model_id}")
     print(f"[merge] {model_key}: sft adapter={sft_checkpoint}")

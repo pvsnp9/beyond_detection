@@ -111,19 +111,17 @@ def _lexical_fallback(a: tuple[str, ...], b: tuple[str, ...]) -> np.ndarray:
 
 
 def get_similarity_backend(cfg: HallEvalConfig) -> SimilarityBackend:
+    # no silent fallback: sbert failures must surface, thresholds are sbert-calibrated
     backend = (cfg.backend or "sbert").strip().lower()
 
     if backend == "sbert":
-        try:
-            from sentence_transformers import SentenceTransformer
+        from sentence_transformers import SentenceTransformer
 
-            model_name = cfg.model_name or "sentence-transformers/all-MiniLM-L6-v2"
-            model = SentenceTransformer(model_name, device=cfg.device)
-            return SbertSimilarityBackend(cfg=cfg, model=model)
-        except Exception:  # noqa: BLE001
-            return TfidfSimilarityBackend()
+        model_name = cfg.model_name or "sentence-transformers/all-MiniLM-L6-v2"
+        model = SentenceTransformer(model_name, device=cfg.device)
+        return SbertSimilarityBackend(cfg=cfg, model=model)
 
     if backend == "tfidf":
         return TfidfSimilarityBackend()
 
-    return TfidfSimilarityBackend()
+    raise ValueError(f"unknown similarity backend: {cfg.backend}")

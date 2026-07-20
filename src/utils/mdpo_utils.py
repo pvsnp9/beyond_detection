@@ -51,6 +51,7 @@ def build_dpo_config(cfg: Dict[str, Any], output_dir: str, run_name: str):
         max_completion_length=dpo_cfg.max_completion_length,
         beta=dpo_cfg.beta,
         loss_type=dpo_cfg.loss_type,
+        rpo_alpha=dpo_cfg.rpo_alpha,
         bf16=extras.bf16,
         fp16=dpo_cfg.fp16,
         tf32=extras.tf32,

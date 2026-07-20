@@ -35,6 +35,10 @@ def format_hf_dpo_data(example: Dict[str, Any], processor:Any)->Dict[str, Any]:
                 max_side=mdpo_params.max_image_side,
                 max_pixels=mdpo_params.max_image_pixels,
             )
+            if type(processor).__name__ == "AyaVisionProcessor":
+                # aya SFT trained on fixed single-tile images; keep DPO consistent
+                side = int(processor.img_size)
+                img = img.resize((side, side))
             images = [img]
             user_content = [{"type": "image"}, {"type": "text", "text": user_text}]
 

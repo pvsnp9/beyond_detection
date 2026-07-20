@@ -56,18 +56,20 @@ def aya_inference_collator(
         for example in examples:
             query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
-            user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
+            # image-only must withhold the caption (mirrors the training collators' _user_text)
+            user_text = query if mode == "image" else (f"{query}\nCAPTION: {caption}".strip() if caption else query)
             content = []
 
             if mode == "text":
                 content.append({"type": "text", "text": user_text})
             elif mode == "image":
-                image = _normalize_image(example.get("image"))
-                content.append({"type": "text", "text": ""})
+                image = _aya_image(example.get("image"), processor)
+                # keep the query text: training image-only rows include it
+                content.append({"type": "text", "text": user_text})
                 content.append({"type": "image", "image": image})
                 images_batch.append(image)
             else:
-                image = _normalize_image(example.get("image"))
+                image = _aya_image(example.get("image"), processor)
                 content.append({"type": "text", "text": user_text})
                 content.append({"type": "image", "image": image})
                 images_batch.append(image)
@@ -150,7 +152,8 @@ def qwen_inference_collator(
         for example in examples:
             query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
-            user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
+            # image-only must withhold the caption (mirrors the training collators' _user_text)
+            user_text = query if mode == "image" else (f"{query}\nCAPTION: {caption}".strip() if caption else query)
 
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
@@ -242,7 +245,8 @@ def llama_inference_collator(
         for example in examples:
             query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
-            user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
+            # image-only must withhold the caption (mirrors the training collators' _user_text)
+            user_text = query if mode == "image" else (f"{query}\nCAPTION: {caption}".strip() if caption else query)
 
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
@@ -335,7 +339,8 @@ def gemma_inference_collator(
         for example in examples:
             query = _resolve_query(example, model_type=model_type)
             caption = (example.get("caption") or "").strip()
-            user_text = f"{query}\nCAPTION: {caption}".strip() if caption else query
+            # image-only must withhold the caption (mirrors the training collators' _user_text)
+            user_text = query if mode == "image" else (f"{query}\nCAPTION: {caption}".strip() if caption else query)
 
             if mode == "text":
                 user_content = [{"type": "text", "text": user_text}]
@@ -382,6 +387,15 @@ def gemma_inference_collator(
     except Exception as e:
         print(f"failed to prep gemma message from batch: {e}")
         raise
+
+def _aya_image(image, processor):
+    # aya trains on fixed single-tile squares (ayacollator, dpo_data); inference must match
+    image = _normalize_image(image)
+    if processor is not None:
+        side = int(processor.img_size)
+        image = image.resize((side, side))
+    return image
+
 
 def _normalize_image(image):
     if image is None:

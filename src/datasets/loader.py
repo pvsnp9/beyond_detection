@@ -70,6 +70,55 @@ def add_freeform_target(dataset: DatasetLike, target_json_key: str = "target_jso
     )
 
 
+RICH_FIELD_ORDER = (
+    "need_explanation", "visual_facts", "evidence_fact_ids", "text_literal",
+    "incongruity", "label", "explanation", "missing_modalities",
+)
+
+
+def _render_rich_target(payload: dict) -> str:
+    """Render a target_json payload as keyword-anchored plain text, exact inverse of
+    src/eval/parsing.parse_rich_freeform_output. Fail-fast asserts guard data drift."""
+    for key in ("text_literal", "incongruity", "explanation"):
+        value = payload.get(key) or ""
+        assert "\n" not in value, f"newline in {key}"
+        assert value.strip().lower() != "none", f"{key} is literal 'none' (lossy)"
+    facts = payload.get("visual_facts") or []
+    assert [vf["id"] for vf in facts] == list(range(1, len(facts) + 1)), "fact ids not contiguous from 1"
+    for vf in facts:
+        assert "\n" not in vf["fact"], "newline in fact"
+
+    lines = [f"NEED_EXPLANATION: {'true' if payload.get('need_explanation', True) else 'false'}"]
+    if facts:
+        lines.append("FACTS:")
+        lines.extend(f"{vf['id']}. {vf['fact']}" for vf in facts)
+    else:
+        lines.append("FACTS: none")
+    evidence = payload.get("evidence_fact_ids") or []
+    lines.append(f"EVIDENCE: {', '.join(str(i) for i in evidence) if evidence else 'none'}")
+    lines.append(f"LITERAL: {payload.get('text_literal') or 'none'}")
+    lines.append(f"INCONGRUITY: {payload.get('incongruity') or 'none'}")
+    lines.append(f"LABEL: {payload['label']}")
+    lines.append(f"EXPLANATION: {payload.get('explanation') or 'none'}")
+    missing = payload.get("missing_modalities") or []
+    lines.append(f"MISSING: {', '.join(missing) if missing else 'none'}")
+    return "\n".join(lines)
+
+
+def _derive_rich_freeform_target(target_json: str) -> dict:
+    # machine-written train data: a malformed row is a pipeline bug, fail fast
+    return {"target_text_rich": _render_rich_target(json.loads(target_json))}
+
+
+def add_rich_freeform_target(dataset: DatasetLike, target_json_key: str = "target_json") -> DatasetLike:
+    """Add 'target_text_rich' for rich_freeform_sft; input_columns avoids image decode."""
+    return dataset.map(
+        _derive_rich_freeform_target,
+        input_columns=[target_json_key],
+        desc="derive rich freeform target",
+    )
+
+
 def load_hf_dpo_dataset(
     *,
     split: Optional[str] = "train",

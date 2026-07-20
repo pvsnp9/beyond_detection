@@ -217,8 +217,61 @@ class LlamaVisionStrategy(VisionStrategy):
         )
 
 
+class AyaVisionStrategy(VisionStrategy):
+    key = "aya"
+    row_keys = ()
+    row_flat_keys = ()
+    extra_concat_keys = ()  # base TRL duplicates pixel_values
+    model_kwarg_keys = ("pixel_values",)
+
+    def __init__(self) -> None:
+        # set on first process_images call; features_match/validate_batch need them
+        self._img_patch_id: int | None = None
+        self._tokens_per_patch: int | None = None
+
+    def process_images(self, processor, pil_images):
+        if self._img_patch_id is None:
+            self._img_patch_id = processor.tokenizer.convert_tokens_to_ids("<|IMG_PATCH|>")
+            side = int(processor.img_size) // int(processor.patch_size)
+            self._tokens_per_patch = side * side
+        # crop_to_patches=True reproduces AyaVisionProcessor.__call__ dynamic tiling;
+        # without it GotOcr2ImageProcessor returns a single resized tile
+        feats = processor.image_processor(
+            images=pil_images, crop_to_patches=True, return_tensors="pt"
+        )
+        return {"pixel_values": feats["pixel_values"], "num_patches": feats["num_patches"]}
+
+    def features_match(self, batch, row_index, feats) -> bool:
+        if batch.get("num_patches") is not None:
+            # corrupted-crop branch: crops are dimension-preserving, tiling must match
+            return bool(torch.equal(batch["num_patches"][row_index], feats["num_patches"]))
+        # real-features branch: prompt <|IMG_PATCH|> tokens must match fresh tiling
+        counts = (batch["prompt_input_ids"][row_index] == self._img_patch_id).sum(-1)
+        return bool(torch.equal(counts, feats["num_patches"] * self._tokens_per_patch))
+
+    def validate_batch(self, model, model_kwargs, input_ids) -> None:
+        pixel_values = model_kwargs.get("pixel_values")
+        if pixel_values is None or self._tokens_per_patch is None:
+            return
+        config = getattr(model, "config", None)
+        image_token_id = getattr(config, "image_token_id", None)
+        if image_token_id is None:
+            image_token_id = getattr(config, "image_token_index", None)
+        if image_token_id is None:
+            return
+        expected = int(pixel_values.shape[0]) * self._tokens_per_patch
+        actual = int((input_ids == image_token_id).sum().item())
+        if actual != expected:
+            raise ValueError(
+                "Image placeholder tokens do not match image features after truncation: "
+                f"tokens={actual}, features={expected}. "
+                "Increase max_length/max_prompt_length for multimodal DPO."
+            )
+
+
 VISION_STRATEGIES = {
     "qwen": QwenVisionStrategy,
     "gemma": GemmaVisionStrategy,
     "llama": LlamaVisionStrategy,
+    "aya": AyaVisionStrategy,
 }

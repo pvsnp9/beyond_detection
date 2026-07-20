@@ -1,255 +1,135 @@
-from __future__ import annotations
-
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-import os
-import json
-from config.logistics import Logistics
-from src.utils.metrics import run_sarcasm_audit
+from typing import Any, Dict
+
+from src.eval.parsing import (
+    discover_latest_results,
+    iter_records,
+    parse_freeform_output,
+    parse_rich_freeform_output,
+    parse_structured_output,
+    reports_root,
+    results_root,
+)
+
+BINARY_LABELS = ("sarcastic", "non_sarcastic")
+MISSING_TARGET = {"both": frozenset(), "text": frozenset({"image"}), "image": frozenset({"text"})}
 
 
-def _parse_timestamp_dir(name: str) -> Optional[float]:
-    try:
-        return datetime.strptime(name, "%Y%m%d_%H%M%S").timestamp()
-    except ValueError:
-        return None
+def _prf(tp: int, fp: int, fn: int) -> Dict[str, float]:
+    # paper convention: 0.0 whenever a denominator is zero
+    p = tp / (tp + fp) if tp + fp else 0.0
+    r = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * p * r / (p + r) if p + r else 0.0
+    return {"p": p, "r": r, "f1": f1}
 
 
-def _latest_timestamp_dir(model_dir: Path) -> Optional[Path]:
-    subdirs = [path for path in model_dir.iterdir() if path.is_dir()]
-    if not subdirs:
-        return None
+def evaluate_file(path: Path, gen_type: str) -> Dict[str, Any]:
+    total = 0
+    modality_count = {"both": 0, "image": 0, "text": 0}
+    parsing_failed = 0
+    bad_format = 0
+    pred_unknown = 0
+    both_pairs: list[tuple[str, str]] = []  # (gt, pred) over parsed both-modality rows
+    uni_n = {"text": 0, "image": 0}
+    uni_correct = {"text": 0, "image": 0}
+    mar_hits = 0
+    mar_n = 0
 
-    parsed = [(path, _parse_timestamp_dir(path.name)) for path in subdirs]
-    parsed_dirs = [item for item in parsed if item[1] is not None]
-    if parsed_dirs:
-        return max(parsed_dirs, key=lambda item: item[1])[0]
+    for rec in iter_records(path):
+        total += 1
+        modality = rec["modality"]
+        modality_count[modality] += 1
 
-    return max(subdirs, key=lambda path: path.stat().st_mtime)
-
-
-def get_latest_result_files(
-    results_dir: Optional[Union[str, Path]] = None
-) -> Dict[str, List[str]]:
-    root = Path(results_dir or Logistics().results_dir)
-    if not root.exists():
-        return {}
-
-    result: Dict[str, List[str]] = {}
-    for model_dir in sorted(path for path in root.iterdir() if path.is_dir()):
-        latest_dir = _latest_timestamp_dir(model_dir)
-        if latest_dir is None:
+        # freeform has no payload (label-only); rich and structured recover the full schema
+        if gen_type == "freeform_sft":
+            pred, _, status = parse_freeform_output(rec["output"])
+            payload = None
+        elif gen_type == "rich_freeform_sft":
+            payload, status = parse_rich_freeform_output(rec["output"])
+            pred = payload["label"] if status == "ok" else None
+        else:
+            payload, status = parse_structured_output(rec["output"])
+            pred = payload["label"] if status == "ok" else None
+        if status == "parsing_failed":
+            parsing_failed += 1
             continue
-        files = sorted(str(path) for path in latest_dir.glob("*.jsonl"))
-        result[model_dir.name] = files
+        if status == "bad_format":
+            bad_format += 1
+            continue
 
-    return result
+        if payload is not None:
+            mar_n += 1
+            predicted_missing = {str(m).strip().lower() for m in payload["missing_modalities"]}
+            mar_hits += predicted_missing == MISSING_TARGET[modality]
 
-def merge_files(input_files: List[str]) -> None:
-    try:
-        if not input_files:
-            raise ValueError("input_files must contain at least one file path")
-        output_dir = Path(input_files[0]).parent
-        output_file = str(output_dir / "merged.jsonl")
-        print(f"Starting merge from {len(input_files)} files into {output_file}")
-        total_lines = 0
-        out_path = Path(output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("a", encoding="utf-8") as out_handle:
-            for input_path in input_files:
-                with open(input_path, "r", encoding="utf-8") as in_handle:
-                    for line in in_handle:
-                        line = line.rstrip("\n")
-                        if not line:
-                            continue
-                        out_handle.write(line + "\n")
-                        total_lines += 1
-        print(
-            f"Completed merging into {output_file}. Total lines merged: {total_lines}"
-        )
-    except Exception as e:
-        print(f"Exception occured while merging files: {e}")
-        raise e
-    
+        if modality == "both":
+            both_pairs.append((rec["gt"], pred))
+            pred_unknown += pred == "unknown"
+        else:
+            uni_n[modality] += 1
+            uni_correct[modality] += pred == "unknown"
 
-def compute_f1(files: Optional[Dict[str, List[str]]] = None) -> Dict[str, Dict[str, Any]]:
-    try:
-        files = files or {}
-        report_dir = Path(os.path.join(Logistics().reports_dir, "cls"))
-        report_dir.mkdir(parents=True, exist_ok=True)
-        out_path = report_dir / f"f1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    n_ok = total - parsing_failed - bad_format
+    n_both = len(both_pairs)
 
-        label_map = {"sarcastic": 1, "non_sarcastic": 0}
-        results: Dict[str, Dict[str, Any]] = {}
+    per_class = {}
+    for cls in BINARY_LABELS:
+        tp = sum(1 for gt, pred in both_pairs if gt == cls and pred == cls)
+        fp = sum(1 for gt, pred in both_pairs if gt != cls and pred == cls)
+        fn = sum(1 for gt, pred in both_pairs if gt == cls and pred != cls)
+        per_class[cls] = _prf(tp, fp, fn)
+    macro = {k: sum(per_class[c][k] for c in BINARY_LABELS) / len(BINARY_LABELS) for k in ("p", "r", "f1")}
 
-        with out_path.open("w", encoding="utf-8") as out_handle:
-            for model_name, model_files in files.items():
-                per_task_payload: Dict[str, Dict[str, Any]] = {}
-
-                for file_path in model_files:
-                    # only process merged files,
-                    if file_path.endswith("explanation.jsonl"): #or file_path.endswith("/merged.jsonl"):
-                        continue
-                    print(f"Processing file: {file_path} for model: {model_name}\n")
-                    task = Path(file_path).stem
-                    total_sample = 0
-                    parsing_failed_count = 0
-                    bad_pred_format_count = 0
-                    per_mode_counts: Dict[str, Dict[str, int]] = {}
-
-                    with open(file_path, "r", encoding="utf-8") as handle:
-                        for line in handle:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            total_sample += 1
-                            try:
-                                record = json.loads(line)
-                            except json.JSONDecodeError:
-                                parsing_failed_count += 1
-                                continue
-
-                            mode = record.get("mode", "unknown")
-                            target_json = record.get("target_json")
-                            output = record.get("output")
-
-                            try:
-                                if isinstance(target_json, str):
-                                    target_json = json.loads(target_json)
-                                if isinstance(output, str):
-                                    output = json.loads(output)
-                            except json.JSONDecodeError:
-                                parsing_failed_count += 1
-                                continue
-
-                            if not isinstance(target_json, dict) or not isinstance(output, dict):
-                                parsing_failed_count += 1
-                                continue
-
-                            ground_truth = target_json.get("label")
-                            pred_label = output.get("lable", output.get("label"))
-                            if pred_label is None:
-                                bad_pred_format_count += 1
-                                continue
-
-                            if ground_truth not in label_map:
-                                parsing_failed_count += 1
-                                continue
-                            if pred_label not in label_map:
-                                bad_pred_format_count += 1
-                                continue
-
-                            gt = label_map[ground_truth]
-                            pred = label_map[pred_label]
-                            counts = per_mode_counts.setdefault(
-                                mode, {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
-                            )
-                            if pred == 1 and gt == 1:
-                                counts["tp"] += 1
-                            elif pred == 1 and gt == 0:
-                                counts["fp"] += 1
-                            elif pred == 0 and gt == 1:
-                                counts["fn"] += 1
-                            elif pred == 0 and gt == 0:
-                                counts["tn"] += 1
-
-                    f1_by_mode: Dict[str, float] = {}
-                    precision_by_mode: Dict[str, float] = {}
-                    reacall_by_mode: Dict[str, float] = {}
-                    accuracy_by_mode: Dict[str, float] = {}
-                    for mode, counts in per_mode_counts.items():
-                        tp = counts["tp"]
-                        fp = counts["fp"]
-                        fn = counts["fn"]
-                        tn = counts["tn"]
-                        denom = (2 * tp) + fp + fn
-                        f1_by_mode[mode] = (2 * tp / denom) if denom else 0.0
-                        precision_denom = tp + fp
-                        recall_denom = tp + fn
-                        accuracy_denom = tp + fp + fn + tn
-                        precision_by_mode[mode] = tp / precision_denom if precision_denom else 0.0
-                        reacall_by_mode[mode] = tp / recall_denom if recall_denom else 0.0
-                        accuracy_by_mode[mode] = (tp + tn) / accuracy_denom if accuracy_denom else 0.0
-
-                    per_task_payload[task] = {
-                        "total_sample": total_sample,
-                        "parsing_failed_count": parsing_failed_count,
-                        "bad_pred_fromat_count": bad_pred_format_count,
-                        "f1_by_mode": f1_by_mode,
-                        "precision_by_mode": precision_by_mode,
-                        "reacall_by_mode": reacall_by_mode,
-                        "accuracy_by_mode": accuracy_by_mode,
-                    }
-
-                payload = {model_name: per_task_payload}
-                out_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                results[model_name] = per_task_payload
-        print(results)
-        return results
-    except Exception as e:
-        print(f"Exception occured while computing F1-score: {e}")
-        raise e
+    n_uni = uni_n["text"] + uni_n["image"]
+    metrics = {
+        "both": {
+            "n_evaluated": n_both,
+            "pred_unknown_count": pred_unknown,
+            "accuracy": sum(1 for gt, pred in both_pairs if gt == pred) / n_both if n_both else None,
+            "per_class": per_class,
+            "macro": macro,
+        },
+        "unimodal": {
+            "n_text": uni_n["text"],
+            "n_image": uni_n["image"],
+            "text_accuracy": uni_correct["text"] / uni_n["text"] if uni_n["text"] else None,
+            "image_accuracy": uni_correct["image"] / uni_n["image"] if uni_n["image"] else None,
+            "overall_accuracy": (uni_correct["text"] + uni_correct["image"]) / n_uni if n_uni else None,
+        },
+        "psr": n_ok / total if total else None,
+        "mar": mar_hits / mar_n if mar_n else None,
+    }
+    return {
+        "total_samples": total,
+        "modality_count": modality_count,
+        "parsing_failed_count": parsing_failed,
+        "bad_format_count": bad_format,
+        "n_ok": n_ok,
+        "metrics": metrics,
+    }
 
 
-def _pick_multiclass_input_file(model_files: List[str]) -> Optional[str]:
-    preferred_names = ("all.jsonl", "merged.jsonl")
-    for preferred_name in preferred_names:
-        for file_path in model_files:
-            if Path(file_path).name == preferred_name:
-                return file_path
+def main() -> None:
+    files = discover_latest_results()
+    if not files:
+        raise FileNotFoundError(f"no result files discovered under {results_root()}")
 
-    for file_path in model_files:
-        if not file_path.endswith("explanation.jsonl"):
-            return file_path
-    return None
+    rows = []
+    for (model, gen_type, split), path in files.items():
+        print(f"classification: {model}/{gen_type}/{split} <- {path}")
+        body = evaluate_file(path, gen_type)
+        rows.append({"model": model, "gen_type": gen_type, "split": split, "source_file": str(path), **body})
 
-
-def compute_multiclass_report(
-    files: Optional[Dict[str, List[str]]] = None,
-) -> Dict[str, Dict[str, Any]]:
-    try:
-        files = files or {}
-        report_dir = Path(os.path.join(Logistics().reports_dir, "cls"))
-        report_dir.mkdir(parents=True, exist_ok=True)
-        out_path = report_dir / f"multiclass_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-
-        results: Dict[str, Dict[str, Any]] = {}
-        with out_path.open("w", encoding="utf-8") as out_handle:
-            for model_name, model_files in files.items():
-                input_file = _pick_multiclass_input_file(model_files)
-                if input_file is None:
-                    print(f"No compatible file found for model: {model_name}")
-                    continue
-
-                print(
-                    f"Computing multiclass metrics for model: {model_name}, file: {input_file}"
-                )
-                metrics = run_sarcasm_audit(input_file)
-                payload = {"model": model_name, "file": input_file, "metrics": metrics}
-                out_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                results[model_name] = payload
-
-        print(f"Saved multiclass report to: {out_path}")
-        return results
-    except Exception as e:
-        print(f"Exception occured while computing multiclass report: {e}")
-        raise e
-
+    report_dir = reports_root()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = report_dir / f"CLS_{ts}.json"
+    report = {"generated_at": ts, "results_root": str(results_root()), "rows": rows}
+    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"wrote {out_path} ({len(rows)} rows)")
 
 
 if __name__ == "__main__":
-    gen_files = get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
-    qwen = dict([gen_files.popitem()])
-    print(f"Using: {qwen}")
-    # #code for merging explanation and detection_explanation files into one detection_explanation file
-    # for model_name, files in gen_files.items():
-    #     print(f"Processing model: {model_name} with files: {files}")
-    #     if len(files) >= 2:
-    #         merge_files(files)
-    #     else: print(f"Not enough files to merge for model: {model_name}")
-    #     print("-----"*20)
-    
-    # updated_files= get_latest_result_files(os.path.join(Logistics().project_root_dir, Logistics().results_dir))
-    compute_f1(qwen)
-    compute_multiclass_report(qwen)
+    main()
